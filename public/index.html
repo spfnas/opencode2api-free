@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>opencode-free-gate</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%23d4a853'/><text x='16' y='22' text-anchor='middle' fill='%2312101a' font-size='16' font-weight='bold'>G</text></svg>">
+<link rel="stylesheet" href="/public/style.css">
+</head>
+<body>
+<div class="sidebar" id="sidebar">
+<div class="logo"><span>opencode-free-gate</span></div>
+<nav id="nav">
+<a class="active" data-tab="dashboard"><span class="icon">📊</span><span>仪表盘</span></a>
+<a data-tab="audit"><span class="icon">📈</span><span>用量审计</span></a>
+<a data-tab="keys"><span class="icon">🔑</span><span>密钥管理</span></a>
+<a data-tab="proxies"><span class="icon">🔄</span><span>代理池</span></a>
+<a data-tab="sources"><span class="icon">📡</span><span>代理源</span></a>
+<a data-tab="config"><span class="icon">⚙️</span><span>配置</span></a>
+<a data-tab="logs"><span class="icon">📋</span><span>日志</span></a>
+</nav>
+</div>
+<div class="main">
+<div class="header">
+<div style="display:flex;align-items:center;gap:6px">
+<button class="menu-btn" onclick="toggleSidebar()" id="menuBtn">☰</button>
+<h1 id="pageTitle">📊 仪表盘</h1>
+</div>
+<div><button class="theme-toggle" onclick="toggleTheme()" id="themeBtn">🌙</button></div>
+</div>
+<div id="tab-dashboard" class="tab-panel">
+<div class="stats" id="statCards"></div>
+<h3 style="font-size:13px;margin:14px 0 6px">🔑 Key 槽位状态</h3>
+<div class="table-wrap" id="keySlotWrap"><div style="padding:16px"><div class="skeleton skeleton-block"></div><div class="skeleton skeleton-line"></div><div class="skeleton skeleton-line" style="width:70%"></div></div></div>
+<div class="actions">
+<button class="btn btn-outline" onclick="doAction('sources/refresh',this)">🔄 刷新代理源</button>
+<button class="btn btn-outline" onclick="doAction('slots/fill',this)">🔧 填充槽位</button>
+<button class="btn btn-outline" onclick="doAction('candidates/load',this)">📦 加载候选</button>
+</div>
+<div class="test-area">
+<h3>发送测试</h3>
+<div class="test-grid">
+<div><label style="font-size:11px;color:var(--muted)">模型</label><select id="testModel"><option>加载中...</option></select></div>
+<div><label style="font-size:11px;color:var(--muted)">消息</label><input id="testPrompt" value="hi"></div>
+<div><label style="font-size:11px;color:var(--muted)">API Key</label><select id="testKeySelect"><option value="">加载中...</option></select></div>
+<button class="btn btn-primary" onclick="sendTest()" id="testBtn">▶️ 发送</button>
+</div>
+<div id="testResult"></div>
+</div>
+</div>
+<div id="tab-audit" class="tab-panel" style="display:none">
+<div class="stats" id="auditSummary"></div>
+<h3 style="font-size:13px;margin:14px 0 6px">🔑 按 Key 统计</h3>
+<div class="table-wrap" id="auditKeyWrap"><div style="padding:16px"><div class="skeleton skeleton-block"></div><div class="skeleton skeleton-line"></div><div class="skeleton skeleton-line" style="width:60%"></div></div></div>
+<h3 style="font-size:13px;margin:14px 0 6px">📊 按模型统计</h3>
+<div class="table-wrap" id="auditModelWrap"><div style="padding:16px"><div class="skeleton skeleton-block"></div><div class="skeleton skeleton-line"></div></div></div>
+<h3 style="font-size:13px;margin:14px 0 6px">📅 每日统计</h3>
+<div class="table-wrap" id="auditDayWrap"><div style="padding:16px"><div class="skeleton skeleton-block"></div><div class="skeleton skeleton-line" style="width:40%"></div></div></div>
+<h3 style="font-size:13px;margin:14px 0 6px">📋 调用详情</h3>
+<div class="table-wrap" id="auditDetailWrap"><div style="padding:16px"><div class="skeleton skeleton-block"></div><div class="skeleton skeleton-line"></div><div class="skeleton skeleton-line" style="width:80%"></div></div></div>
+</div>
+<div id="tab-keys" class="tab-panel" style="display:none">
+<div class="actions"><button class="btn btn-primary" onclick="showAddKey()">➕ 添加密钥</button></div>
+<div class="table-wrap" id="keyTableWrap"></div>
+</div>
+<div id="tab-proxies" class="tab-panel" style="display:none">
+<div class="actions">
+<button class="btn btn-primary" onclick="showAddProxies()">➕ 添加代理</button>
+<button class="btn btn-outline" onclick="doAction('released/probe',this)">🔍 测活备用池</button>
+<button class="btn btn-outline" onclick="doAction('released/promote',this)">⬆️ 提拔备用池</button>
+</div>
+<div class="table-wrap" id="proxyTableWrap"></div>
+<h3 style="font-size:13px;margin:14px 0 6px">🔄 备用候选池</h3>
+<div class="table-wrap" id="releasedTableWrap"></div>
+</div>
+<div id="tab-sources" class="tab-panel" style="display:none">
+<div class="actions"><button class="btn btn-primary" onclick="showAddSource()">➕ 添加源</button></div>
+<div class="table-wrap" id="sourceTableWrap"></div>
+</div>
+<div id="tab-config" class="tab-panel" style="display:none">
+<div id="configForm"></div>
+</div>
+<div id="tab-logs" class="tab-panel" style="display:none">
+<div class="actions"><button class="btn btn-outline" onclick="doAction('server/logs',this)">🔄 刷新</button></div>
+<div id="logBox"></div>
+</div>
+</div>
+<div id="toast"></div>
+<div id="modal"></div>
+<div id="sidebarOverlay" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;z-index:5;background:rgba(0,0,0,.3)" onclick="toggleSidebar()"></div>
+<script src="/public/app.js"></script>
+</body>
+</html>

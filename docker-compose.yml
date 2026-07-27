@@ -1,0 +1,37 @@
+services:
+  opencode-warp:
+    image: caomingjun/warp:latest
+    container_name: opencode-warp
+    restart: always
+    cap_add:
+      - NET_ADMIN
+      - SYS_ADMIN
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=0
+    environment:
+      - WARP_SLEEP=2
+    networks:
+      qwrt_macnet:
+        ipv4_address: 192.168.1.201
+
+  opencode-gate:
+    image: opencode-gate-remote:latest
+    container_name: opencode-gate
+    restart: always
+    depends_on:
+      - opencode-warp
+    environment:
+      - PORT=13339
+      - WARP_MODE=on
+      - WARP_HOST=192.168.1.201
+      - WARP_SOCKS5_PORT=1080
+      - API_KEY=admin123
+    cap_add:
+      - NET_ADMIN
+    networks:
+      qwrt_macnet:
+        ipv4_address: 192.168.1.202
+
+networks:
+  qwrt_macnet:
+    external: true

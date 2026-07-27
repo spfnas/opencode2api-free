@@ -1,0 +1,8 @@
+node_modules/
+.bak
+*.bak
+.opencode/
+data/
+wgcf-profile.conf
+.DS_Store
+*.log
