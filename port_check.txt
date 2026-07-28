@@ -1,0 +1,83 @@
+=== Port Mapping ===
+
+
+=== Network ===
+{
+    "qwrt_macnet": {
+        "IPAMConfig": {
+            "IPv4Address": "192.168.1.202"
+        },
+        "Links": null,
+        "Aliases": [
+            "opencode-gate",
+            "opencode-gate"
+        ],
+        "MacAddress": "7a:07:4f:67:2e:51",
+        "DriverOpts": null,
+        "GwPriority": 0,
+        "NetworkID": "12beacc3e45562f3beba2a8f6580461164a5ed23e836d59702497259caad8d95",
+        "EndpointID": "b53c99bded9375c4ae014e671b0da048ef2c94555aab5455ee7d82dc7c0728fd",
+        "Gateway": "192.168.1.1",
+        "IPAddress": "192.168.1.202",
+        "IPPrefixLen": 24,
+        "IPv6Gateway": "",
+        "GlobalIPv6Address": "",
+        "GlobalIPv6PrefixLen": 0,
+        "DNSNames": [
+            "opencode-gate",
+            "6f5fc50ea7ff"
+        ]
+    }
+}
+
+=== Listening Ports ===
+
+
+=== docker-compose.yml ===
+services:
+  opencode-warp:
+    image: caomingjun/warp:latest
+    container_name: opencode-warp
+    restart: always
+    cap_add:
+      - NET_ADMIN
+      - SYS_ADMIN
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=0
+    environment:
+      - WARP_SLEEP=2
+    networks:
+      qwrt_macnet:
+        ipv4_address: 192.168.1.201
+
+  opencode-gate:
+    image: opencode-gate-remote:latest
+    container_name: opencode-gate
+    restart: always
+    depends_on:
+      - opencode-warp
+    volumes:
+      - /home/spfnas/opencode-gate/public:/app/public
+      - /home/spfnas/opencode-gate/data:/app/data
+    environment:
+      - PORT=13339
+      - WARP_MODE=on
+      - WARP_HOST=192.168.1.201
+      - WARP_SOCKS5_PORT=1080
+      - API_KEY=admin123
+      - DATA_DIR=/app/data
+    cap_add:
+      - NET_ADMIN
+    networks:
+      qwrt_macnet:
+        ipv4_address: 192.168.1.202
+
+networks:
+  qwrt_macnet:
+    external: true
+
+=== Local curl to 192.168.1.202:13339 ===
+HTTP: 200
+
+=== Local curl to localhost:13339 ===
+HTTP: 000

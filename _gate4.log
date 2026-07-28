@@ -1,0 +1,37 @@
+[门] http://localhost:13339
+[门] OpenAI:    /openai/v1/chat/completions | /openai/v1/models
+[门] Anthropic: /anthropic/v1/messages
+[门] 策略:      S级代理(3槽) → 自定义代理兜底(未配置)
+[门] 备用:      未配置 ZENPROXY_KEY
+[门] 重试:      MAX_RETRIES=3
+[门] Node.js server started on port 13339
+[选] 53 S-grade candidates
+[选] 53 S-grade candidates
+[探+] 208.82.61.64:3128 (1180ms)
+[探+] 152.22.72.24:80 (1114ms)
+[探+] 168.184.86.23:80 (1012ms)
+[槽] 3/3 ready (added 3)
+[槽] 3/3 ready (added 0)
+[>] POST /openai/v1/chat/completions
+[取] 208.82.61.64:3128 (retry=0)
+[错码] 208.82.61.64:3128 状态码 403，换IP重试
+[弃] 208.82.61.64:3128 → 2/3
+[取] 168.184.86.23:80 (retry=1)
+[探+] 50.205.246.13:80 (1345ms)
+[槽] 3/3 ready (added 1)
+[>] POST /openai/v1/chat/completions
+[取] 50.205.246.13:80 (retry=0)
+[>] POST /openai/v1/chat/completions
+[取] 152.22.72.24:80 (retry=0)
+[>] POST /openai/v1/chat/completions
+[提示] deepseek-v4-flash-free max_tokens 自动提升到 1000
+[取] 168.184.86.23:80 (retry=0)
+[>] POST /openai/v1/chat/completions
+[提示] mimo-v2.5-free max_tokens 自动提升到 1000
+[取] 50.205.246.13:80 (retry=0)
+[429] 50.205.246.13:80 被限流，换IP重试
+[弃] 50.205.246.13:80 → 2/3
+[取] 152.22.72.24:80 (retry=1)
+[探+] 43.110.40.117:8888 (1122ms)
+[槽] 3/3 ready (added 1)
+[选] 129 S-grade candidates

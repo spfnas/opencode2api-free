@@ -1,0 +1,15 @@
+[门] http://localhost:13339
+[门] OpenAI:    /openai/v1/chat/completions | /openai/v1/models
+[门] Anthropic: /anthropic/v1/messages
+[门] 策略:      S级代理(3槽) → 自定义代理兜底(未配置)
+[门] 备用:      未配置 ZENPROXY_KEY
+[门] 重试:      MAX_RETRIES=3
+[门] Node.js server started on port 13339
+[选] 2 S-grade candidates
+[选] 2 S-grade candidates
+[选] 2 S-grade candidates
+[选] 1 S-grade candidates
+[槽] 0/3 ready (added 0)
+[槽] 0/3 ready (added 0)
+
+C:\Users\Administrator\.qwenpaw\workspaces\default\_opencode-gate>

@@ -1,0 +1,83 @@
+[
+  {
+    "address": "95.211.64.139:8889",
+    "protocol": "http",
+    "quality_grade": "S",
+    "lastFailedAt": 1785230208600,
+    "lastSucceededAt": 1785228592339,
+    "consecutiveFailures": 15,
+    "consecutiveSuccesses": 0
+  },
+  {
+    "address": "168.119.153.216:8888",
+    "protocol": "http",
+    "quality_grade": "S",
+    "lastFailedAt": 1785230208600,
+    "lastSucceededAt": 1785088476700,
+    "consecutiveFailures": 1229,
+    "consecutiveSuccesses": 0
+  },
+  {
+    "address": "150.238.75.122:3128",
+    "protocol": "http",
+    "quality_grade": "S",
+    "lastFailedAt": 1785230208600,
+    "lastSucceededAt": 1784989774098,
+    "consecutiveFailures": 2083,
+    "consecutiveSuccesses": 0
+  },
+  {
+    "address": "168.184.84.85:443",
+    "protocol": "http",
+    "quality_grade": "S",
+    "lastFailedAt": 1785230208600,
+    "lastSucceededAt": 1784987974462,
+    "consecutiveFailures": 2097,
+    "consecutiveSuccesses": 0
+  },
+  {
+    "address": "168.184.84.85:80",
+    "protocol": "http",
+    "quality_grade": "B",
+    "lastFailedAt": 1785230208600,
+    "lastSucceededAt": 1784987974462,
+    "consecutiveFailures": 2097,
+    "consecutiveSuccesses": 0
+  },
+  {
+    "address": "64.181.240.152:3128",
+    "protocol": "http",
+    "quality_grade": "S",
+    "lastFailedAt": 1785230208600,
+    "lastSucceededAt": 1785230103600,
+    "consecutiveFailures": 2,
+    "consecutiveSuccesses": 0
+  },
+  {
+    "address": "157.254.194.57:1080",
+    "protocol": "http",
+    "quality_grade": "S",
+    "lastFailedAt": 1785230208600,
+    "lastSucceededAt": 1785183878473,
+    "consecutiveFailures": 405,
+    "consecutiveSuccesses": 0
+  },
+  {
+    "address": "34.69.61.247:80",
+    "protocol": "http",
+    "quality_grade": "S",
+    "lastFailedAt": 1785230208600,
+    "lastSucceededAt": 1785230088597,
+    "consecutiveFailures": 3,
+    "consecutiveSuccesses": 0
+  },
+  {
+    "address": "147.45.60.252:1082",
+    "protocol": "http",
+    "quality_grade": "S",
+    "lastFailedAt": 1785230208600,
+    "lastSucceededAt": 1785230103600,
+    "consecutiveFailures": 2,
+    "consecutiveSuccesses": 0
+  }
+]

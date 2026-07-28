@@ -1,0 +1,8 @@
+FROM oven/bun:1-alpine
+RUN apk add --no-cache ca-certificates
+WORKDIR /app
+COPY package.json .
+RUN bun install --frozen-lockfile 2>/dev/null || bun install
+COPY gate.ts .
+COPY public/ public/
+CMD ["bun", "run", "gate.ts"]

@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>opencode-free-gate 管理面板设计</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#111;color:#e0e0e0;padding:40px}
+h1{font-size:28px;background:linear-gradient(135deg,#7c4dff,#448aff);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:24px}
+h2{font-size:18px;color:#7c4dff;margin:24px 0 12px}
+.section{background:#1a1a2e;border:1px solid #2a2a4a;border-radius:12px;padding:20px;margin-bottom:20px}
+.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:16px 0}
+.card{background:#222;border:1px solid #2a2a4a;border-radius:8px;padding:16px;text-align:center}
+.card .label{font-size:11px;color:#888;text-transform:uppercase}
+.card .value{font-size:24px;font-weight:700;margin:4px 0}
+.card .value.blue{color:#448aff}
+.card .value.green{color:#00e676}
+.card .value.yellow{color:#ffd740}
+.card .value.red{color:#ff5252}
+table{width:100%;border-collapse:collapse;font-size:13px;margin:12px 0}
+th,td{padding:10px 12px;text-align:left;border-bottom:1px solid #2a2a4a}
+th{color:#888;font-size:11px;text-transform:uppercase}
+.tag{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600}
+.tag.active{background:rgba(0,230,118,.15);color:#00e676}
+.tag.pending{background:rgba(255,215,64,.15);color:#ffd740}
+.tag.warp{background:rgba(68,138,255,.15);color:#448aff}
+.grade{font-weight:700}
+.grade.S{color:#00e676}
+.grade.A{color:#448aff}
+.grade.B{color:#ffd740}
+.grade.C{color:#888}
+.btn{border:none;padding:6px 12px;border-radius:6px;cursor:pointer;font-size:12px}
+.btn-primary{background:#7c4dff;color:#fff}
+.btn-danger{background:#ff5252;color:#fff}
+.btn-success{background:#00e676;color:#000}
+.btn-ghost{background:none;border:1px solid #2a2a4a;color:#e0e0e0}
+.tabs{display:flex;gap:4px;background:#1a1a2e;border-radius:8px;padding:4px;margin-bottom:20px}
+.tab{padding:10px 20px;border-radius:6px;font-size:14px;color:#888;cursor:pointer}
+.tab.active{background:#7c4dff;color:#fff}
+.form{display:grid;gap:12px;margin:12px 0}
+.form label{font-size:12px;color:#888}
+.form input,.form select,.form textarea{background:#222;border:1px solid #2a2a4a;border-radius:6px;padding:10px;color:#e0e0e0;font-size:13px}
+.log-box{background:#000;border:1px solid #2a2a4a;border-radius:8px;padding:16px;font-family:monospace;font-size:12px;max-height:200px;overflow-y:auto;color:#00e676}
+</style>
+</head>
+<body>
+<h1>opencode-free-gate — 管理面板设计</h1>
+
+<!-- Tab 栏 -->
+<div class="tabs">
+  <div class="tab active">📊 仪表盘</div>
+  <div class="tab">🔄 代理池</div>
+  <div class="tab">📡 代理源</div>
+  <div class="tab">⚙️ 配置</div>
+  <div class="tab">📋 日志</div>
+</div>
+
+<!-- Tab 1: 仪表盘 -->
+<div class="section">
+  <h2>📊 仪表盘</h2>
+  <div class="grid">
+    <div class="card"><div class="label">活跃槽位</div><div class="value blue">2 / 3</div></div>
+    <div class="card"><div class="label">候选代理</div><div class="value yellow">2,745</div></div>
+    <div class="card"><div class="label">总请求</div><div class="value green">1,234</div></div>
+    <div class="card"><div class="label">成功率</div><div class="value green">87.5%</div></div>
+    <div class="card"><div class="label">限流次数</div><div class="value red">3</div></div>
+    <div class="card"><div class="label">代理源</div><div class="value blue">2</div></div>
+    <div class="card"><div class="label">WARP 状态</div><div class="value green">✅ 运行中</div></div>
+  </div>
+  <p style="margin-top:16px;color:#888;font-size:13px">发送测试 + 快速操作按钮（刷新源/填充槽位/加载候选）</p>
+</div>
+
+<!-- Tab 2: 代理池 -->
+<div class="section">
+  <h2>🔄 代理池</h2>
+  <div style="margin-bottom:12px">
+    <button class="btn btn-primary">➕ 批量添加</button>
+    <button class="btn btn-ghost">🔄 刷新</button>
+  </div>
+  <table>
+    <thead><tr><th>地址</th><th>协议</th><th>等级</th><th>延迟</th><th>状态</th><th>操作</th></tr></thead>
+    <tbody>
+      <tr><td>40.81.205.181:1080</td><td>http</td><td class="grade S">S</td><td>2031ms</td><td><span class="tag active">活跃</span></td><td><button class="btn btn-danger">删除</button></td></tr>
+      <tr><td>68.71.251.134:4145</td><td>socks5</td><td class="grade S">S</td><td>3260ms</td><td><span class="tag active">活跃</span></td><td><button class="btn btn-danger">删除</button></td></tr>
+      <tr><td>host.docker.internal:1080</td><td>socks5</td><td class="grade S">S</td><td>695ms</td><td><span class="tag warp">WARP</span></td><td><button class="btn btn-danger">删除</button></td></tr>
+      <tr><td>192.168.1.1:8080</td><td>http</td><td class="grade A">A</td><td>500ms</td><td><span class="tag pending">待探活</span></td><td><button class="btn btn-danger">删除</button> <button class="btn btn-success">提拔</button></td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- Tab 3: 代理源 -->
+<div class="section">
+  <h2>📡 代理源</h2>
+  <table>
+    <thead><tr><th>名称</th><th>类型</th><th>代理数</th><th>状态</th><th>操作</th></tr></thead>
+    <tbody>
+      <tr><td>amux</td><td>json</td><td>3,284</td><td><span class="tag active">正常</span></td><td><button class="btn btn-danger">删除</button></td></tr>
+      <tr><td>speedx-socks5</td><td>text</td><td>3,284</td><td><span class="tag active">正常</span></td><td><button class="btn btn-danger">删除</button></td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- Tab 4: 配置 -->
+<div class="section">
+  <h2>⚙️ 配置</h2>
+  <div class="form" style="max-width:400px">
+    <div><label>端口</label><input value="13339"></div>
+    <div><label>槽位数</label><input value="3"></div>
+    <div><label>最大重试</label><input value="3"></div>
+    <div><label>超时 (ms)</label><input value="120000"></div>
+    <div><label>WARP 模式</label><select><option>开启</option><option>关闭</option></select></div>
+    <div><label>WARP 地址</label><input value="host.docker.internal:1080"></div>
+    <button class="btn btn-primary">💾 保存配置</button>
+  </div>
+</div>
+
+<!-- Tab 5: 日志 -->
+<div class="section">
+  <h2>📋 日志</h2>
+  <div style="margin-bottom:8px">
+    <button class="btn btn-ghost">🔄 刷新</button>
+    <button class="btn btn-ghost">🗑️ 清空</button>
+  </div>
+  <div class="log-box">
+    <div>[00:15:02] [门] http://localhost:13339</div>
+    <div>[00:15:02] [门] 策略: S级代理(3槽) → 自定义代理兜底</div>
+    <div>[00:15:05] [探+] 40.81.205.181:1080 (2031ms)</div>
+    <div>[00:15:05] [探+] 68.71.251.134:4145 (3260ms)</div>
+    <div>[00:15:05] [探+] host.docker.internal:1080 (695ms)</div>
+    <div>[00:15:05] [槽] 3/3 slots ready</div>
+    <div>[00:15:10] [源] speedx-socks5: 3284 proxies</div>
+  </div>
+</div>
+
+</body>
+</html>

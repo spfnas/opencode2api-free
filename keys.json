@@ -1,0 +1,15 @@
+{
+  "admin123": {
+    "key": "admin123",
+    "name": "默认",
+    "enabled": true,
+    "createdAt": 1784878887940,
+    "lastUsedAt": 1785226021149,
+    "totalRequests": 48,
+    "totalTokens": 13756,
+    "maxConcurrency": 0,
+    "maxRequests": 0,
+    "requestCount": 48,
+    "expiresAt": 0
+  }
+}

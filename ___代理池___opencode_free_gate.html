@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="zh-CN"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>代理池 - opencode-free-gate</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Geist:wght@600;800;900&family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@100..900&family=Inter:wght@100..900&family=JetBrains+Mono:wght@100..900&display=swap" rel="stylesheet"/>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+            vertical-align: middle;
+        }
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #111125;
+            color: #e2e0fc;
+            margin: 0;
+        }
+        .hide-scrollbar::-webkit-scrollbar {
+            display: none;
+        }
+        .hide-scrollbar {
+            -ms-overflow-style: none;
+            scrollbar-width: none;
+        }
+        .glass-card {
+            background: rgba(30, 30, 50, 0.6);
+            backdrop-filter: blur(8px);
+            border: 1px solid #494455;
+        }
+    </style>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    "colors": {
+                        "on-primary-fixed": "#20005f",
+                        "outline-variant": "#494455",
+                        "error-container": "#93000a",
+                        "on-secondary-fixed-variant": "#004495",
+                        "on-tertiary-container": "#fff7f4",
+                        "surface-container": "#1e1e32",
+                        "tertiary-fixed": "#ffdbc7",
+                        "primary-fixed": "#e8deff",
+                        "primary-container": "#7c4dff",
+                        "tertiary-fixed-dim": "#ffb688",
+                        "secondary-container": "#0066da",
+                        "on-background": "#e2e0fc",
+                        "error": "#ffb4ab",
+                        "inverse-on-surface": "#2f2e43",
+                        "on-secondary": "#002e6a",
+                        "surface-variant": "#333348",
+                        "primary-fixed-dim": "#cdbdff",
+                        "outline": "#948ea1",
+                        "secondary": "#adc6ff",
+                        "on-tertiary-fixed": "#311300",
+                        "on-primary-fixed-variant": "#4f00d0",
+                        "surface-tint": "#cdbdff",
+                        "secondary-fixed": "#d8e2ff",
+                        "on-error": "#690005",
+                        "secondary-fixed-dim": "#adc6ff",
+                        "primary": "#cdbdff",
+                        "surface-container-lowest": "#0c0c1f",
+                        "surface-container-high": "#28283d",
+                        "surface-container-low": "#1a1a2e",
+                        "background": "#111125",
+                        "on-tertiary-fixed-variant": "#733600",
+                        "surface-dim": "#111125",
+                        "inverse-surface": "#e2e0fc",
+                        "on-surface": "#e2e0fc",
+                        "on-tertiary": "#512400",
+                        "on-error-container": "#ffdad6",
+                        "surface": "#111125",
+                        "surface-container-highest": "#333348",
+                        "tertiary": "#ffb688",
+                        "on-surface-variant": "#cac3d8",
+                        "on-primary": "#370096",
+                        "surface-bright": "#37374d",
+                        "tertiary-container": "#b55800",
+                        "on-secondary-container": "#e6ecff",
+                        "on-primary-container": "#fcf6ff",
+                        "inverse-primary": "#6833ea",
+                        "on-secondary-fixed": "#001a42"
+                    },
+                    "borderRadius": {
+                        "DEFAULT": "0.25rem",
+                        "lg": "0.5rem",
+                        "xl": "0.75rem",
+                        "full": "9999px"
+                    },
+                    "spacing": {
+                        "gutter": "24px",
+                        "base": "8px",
+                        "lg": "40px",
+                        "xs": "4px",
+                        "container-max": "1440px",
+                        "md": "24px",
+                        "sm": "12px",
+                        "xl": "64px"
+                    },
+                    "fontFamily": {
+                        "headline-lg": ["Geist"],
+                        "label-mono": ["JetBrains Mono"],
+                        "body-md": ["Inter"],
+                        "body-lg": ["Inter"],
+                        "headline-sm": ["Geist"],
+                        "headline-md": ["Geist"],
+                        "body-sm": ["Inter"]
+                    },
+                    "fontSize": {
+                        "headline-lg": ["32px", {"lineHeight": "1.2", "letterSpacing": "-0.02em", "fontWeight": "600"}],
+                        "label-mono": ["13px", {"lineHeight": "1", "letterSpacing": "0.02em", "fontWeight": "500"}],
+                        "body-md": ["14px", {"lineHeight": "1.5", "fontWeight": "400"}],
+                        "body-lg": ["16px", {"lineHeight": "1.6", "fontWeight": "400"}],
+                        "headline-sm": ["18px", {"lineHeight": "1.4", "fontWeight": "600"}],
+                        "headline-md": ["24px", {"lineHeight": "1.3", "fontWeight": "600"}],
+                        "body-sm": ["12px", {"lineHeight": "1.5", "fontWeight": "400"}]
+                    }
+                },
+            },
+        }
+    </script>
+</head>
+<body class="bg-background text-on-surface">
+<!-- TopNavBar -->
+<header class="fixed top-0 w-full z-50 flex justify-between items-center px-gutter h-16 bg-surface border-b border-outline-variant">
+<div class="flex items-center gap-8">
+<span class="font-headline-md text-headline-md font-bold text-primary">opencode-free-gate</span>
+<nav class="hidden lg:flex items-center gap-6">
+<a class="text-on-surface-variant hover:text-primary transition-colors cursor-pointer font-body-md text-body-md" href="#">仪表盘</a>
+<a class="text-primary border-b-2 border-primary pb-1 font-bold font-body-md text-body-md" href="#">代理池</a>
+<a class="text-on-surface-variant hover:text-primary transition-colors cursor-pointer font-body-md text-body-md" href="#">代理源</a>
+<a class="text-on-surface-variant hover:text-primary transition-colors cursor-pointer font-body-md text-body-md" href="#">配置</a>
+<a class="text-on-surface-variant hover:text-primary transition-colors cursor-pointer font-body-md text-body-md" href="#">Logs</a>
+</nav>
+</div>
+<div class="flex items-center gap-4">
+<button class="p-2 hover:bg-surface-container-low transition-colors rounded-lg cursor-pointer active:opacity-80" id="theme-toggle">
+<span class="material-symbols-outlined text-primary" data-icon="dark_mode">dark_mode</span>
+</button>
+<button class="p-2 hover:bg-surface-container-low transition-colors rounded-lg cursor-pointer active:opacity-80">
+<span class="material-symbols-outlined text-primary" data-icon="notifications">notifications</span>
+</button>
+<div class="w-8 h-8 rounded-full overflow-hidden border border-outline">
+<img class="w-full h-full object-cover" data-alt="A professional studio portrait of a software architect, centered framing, high-end commercial photography style, neutral soft lighting, corporate tech environment background in cool blue and purple tones, reflecting a modern minimalist aesthetic." src="https://lh3.googleusercontent.com/aida-public/AB6AXuDAqrHiOUVHM42fsUxNSSCw_hRff_HLSRLoXBp2fZD8PC8M-HWPWrCTH4i0LbfzXw1WD5E7r7OZUxml8EXHxri2gOZ1UGu4di_kMraVCnsvDX8H8GHSFoysgWz6ylQB9IWGIi7-XUXPnC6UFinY7e8-TIUyWHe0O2zGf0ZL2CQyOfVXdBJvj_4DlEVxuwwefQq2AC6lY-O35YcoC6P2r1e8PdKaankaUyMF1wbK5gSwYHjxvA6KXmz_zXTBsIq56dzf1_E5RrJF86E"/>
+</div>
+</div>
+</header>
+<!-- SideNavBar (Desktop Only) -->
+<aside class="hidden md:flex flex-col fixed left-0 top-16 h-[calc(100vh-64px)] w-60 p-4 gap-2 bg-surface-container border-r border-outline-variant">
+<div class="mb-6 px-2">
+<h2 class="font-headline-sm text-headline-sm font-black text-primary">FreeGate</h2>
+<p class="text-on-surface-variant font-label-mono text-[11px] opacity-70">AI Proxy Admin</p>
+</div>
+<div class="flex flex-col gap-1 flex-grow">
+<a class="flex items-center gap-3 p-3 text-on-surface-variant hover:bg-surface-variant transition-all scale-95 active:scale-90 rounded-lg" href="#">
+<span class="material-symbols-outlined" data-icon="dashboard">dashboard</span>
+<span class="font-label-mono text-label-mono">仪表盘</span>
+</a>
+<a class="flex items-center gap-3 p-3 bg-primary-container text-on-primary-container font-bold rounded-lg transition-all scale-95 active:scale-90" href="#">
+<span class="material-symbols-outlined" data-icon="rebase_edit">rebase_edit</span>
+<span class="font-label-mono text-label-mono">代理池</span>
+</a>
+<a class="flex items-center gap-3 p-3 text-on-surface-variant hover:bg-surface-variant transition-all scale-95 active:scale-90 rounded-lg" href="#">
+<span class="material-symbols-outlined" data-icon="router">router</span>
+<span class="font-label-mono text-label-mono">代理源</span>
+</a>
+<a class="flex items-center gap-3 p-3 text-on-surface-variant hover:bg-surface-variant transition-all scale-95 active:scale-90 rounded-lg" href="#">
+<span class="material-symbols-outlined" data-icon="settings">settings</span>
+<span class="font-label-mono text-label-mono">配置</span>
+</a>
+<a class="flex items-center gap-3 p-3 text-on-surface-variant hover:bg-surface-variant transition-all scale-95 active:scale-90 rounded-lg" href="#">
+<span class="material-symbols-outlined" data-icon="description">description</span>
+<span class="font-label-mono text-label-mono">日志</span>
+</a>
+</div>
+<div class="mt-auto flex flex-col gap-1 border-t border-outline-variant pt-4">
+<a class="flex items-center gap-3 p-3 text-on-surface-variant hover:bg-surface-variant transition-all scale-95 active:scale-90 rounded-lg" href="#">
+<span class="material-symbols-outlined" data-icon="help">help</span>
+<span class="font-label-mono text-label-mono">Help</span>
+</a>
+<a class="flex items-center gap-3 p-3 text-on-surface-variant hover:bg-surface-variant transition-all scale-95 active:scale-90 rounded-lg text-error" href="#">
+<span class="material-symbols-outlined text-error" data-icon="logout">logout</span>
+<span class="font-label-mono text-label-mono">Logout</span>
+</a>
+</div>
+</aside>
+<!-- Main Content Canvas -->
+<main class="md:ml-60 pt-24 px-gutter pb-xl min-h-screen">
+<!-- Header Section -->
+<div class="flex flex-col md:flex-row md:items-end justify-between gap-6 mb-8">
+<div class="space-y-1">
+<h1 class="font-headline-lg text-headline-lg text-primary">代理池管理</h1>
+<p class="font-body-md text-body-md text-on-surface-variant max-w-2xl">监控和管理您的动态代理。系统自动维护活跃代理，并定期从代理源中推广候选者。</p>
+</div>
+<div class="flex items-center gap-3">
+<div class="flex bg-surface-container rounded-lg p-1 border border-outline-variant">
+<button class="px-4 py-1.5 bg-primary-container text-on-primary-container font-label-mono text-label-mono rounded-md">所有代理</button>
+<button class="px-4 py-1.5 text-on-surface-variant hover:text-primary font-label-mono text-label-mono transition-colors">仅活跃</button>
+</div>
+<button class="flex items-center gap-2 bg-primary px-4 py-2 text-on-primary font-bold rounded-lg hover:brightness-110 active:scale-95 transition-all">
+<span class="material-symbols-outlined" data-icon="refresh">refresh</span>
+<span class="font-label-mono text-label-mono">刷新池</span>
+</button>
+</div>
+</div>
+<!-- Metrics Overview Bento -->
+<div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+<div class="bg-surface-container p-6 rounded-lg border border-outline-variant">
+<div class="flex items-center justify-between mb-4">
+<span class="text-on-surface-variant font-label-mono text-label-mono">活跃代理</span>
+<span class="material-symbols-outlined text-primary" data-icon="bolt">bolt</span>
+</div>
+<div class="text-3xl font-black font-headline-md">124</div>
+<div class="mt-2 flex items-center text-xs text-secondary">
+<span class="material-symbols-outlined text-sm" data-icon="arrow_upward">arrow_upward</span>
+<span>12% 较昨日</span>
+</div>
+</div>
+<div class="bg-surface-container p-6 rounded-lg border border-outline-variant">
+<div class="flex items-center justify-between mb-4">
+<span class="text-on-surface-variant font-label-mono text-label-mono">平均延迟</span>
+<span class="material-symbols-outlined text-tertiary" data-icon="timer">timer</span>
+</div>
+<div class="text-3xl font-black font-headline-md">142ms</div>
+<div class="mt-2 flex items-center text-xs text-error">
+<span class="material-symbols-outlined text-sm" data-icon="arrow_downward">arrow_downward</span>
+<span>5ms 波动</span>
+</div>
+</div>
+<div class="bg-surface-container p-6 rounded-lg border border-outline-variant">
+<div class="flex items-center justify-between mb-4">
+<span class="text-on-surface-variant font-label-mono text-label-mono">候选代理</span>
+<span class="material-symbols-outlined text-secondary" data-icon="pending">pending</span>
+</div>
+<div class="text-3xl font-black font-headline-md">892</div>
+<div class="mt-2 text-xs text-on-surface-variant">等待质量验证</div>
+</div>
+<div class="bg-surface-container p-6 rounded-lg border border-outline-variant">
+<div class="flex items-center justify-between mb-4">
+<span class="text-on-surface-variant font-label-mono text-label-mono">今日失败数</span>
+<span class="material-symbols-outlined text-error" data-icon="error">error</span>
+</div>
+<div class="text-3xl font-black font-headline-md">2.1k</div>
+<div class="mt-2 text-xs text-on-surface-variant">连接被拒绝</div>
+</div>
+</div>
+<!-- Table Container -->
+<div class="bg-surface-container rounded-lg border border-outline-variant overflow-hidden">
+<div class="p-4 border-b border-outline-variant bg-surface-container-high flex items-center justify-between">
+<h3 class="font-headline-sm text-headline-sm flex items-center gap-2">
+<span class="material-symbols-outlined text-primary" data-icon="list">list</span>
+                    核心池 (Active & Candidates)
+                </h3>
+<div class="relative">
+<span class="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-on-surface-variant text-sm" data-icon="search">search</span>
+<input class="bg-surface border border-outline-variant rounded-lg pl-10 pr-4 py-1.5 text-sm focus:border-primary focus:ring-0 w-64" placeholder="搜索 IP 或 协议..." type="text"/>
+</div>
+</div>
+<div class="overflow-x-auto">
+<table class="w-full text-left border-collapse">
+<thead>
+<tr class="text-on-surface-variant border-b border-outline-variant">
+<th class="px-6 py-4 font-label-mono text-label-mono uppercase tracking-wider">地址 (Address)</th>
+<th class="px-6 py-4 font-label-mono text-label-mono uppercase tracking-wider">协议 (Protocol)</th>
+<th class="px-6 py-4 font-label-mono text-label-mono uppercase tracking-wider">等级 (Grade)</th>
+<th class="px-6 py-4 font-label-mono text-label-mono uppercase tracking-wider">延迟 (Latency)</th>
+<th class="px-6 py-4 font-label-mono text-label-mono uppercase tracking-wider">状态 (Status)</th>
+<th class="px-6 py-4 font-label-mono text-label-mono uppercase tracking-wider text-right">操作 (Actions)</th>
+</tr>
+</thead>
+<tbody class="divide-y divide-outline-variant">
+<!-- Active Proxy 1 -->
+<tr class="hover:bg-surface-variant transition-colors group">
+<td class="px-6 py-4 font-label-mono">192.168.1.104:8080</td>
+<td class="px-6 py-4"><span class="bg-secondary-container text-on-secondary-container px-2 py-0.5 rounded text-[11px] font-bold">HTTPS</span></td>
+<td class="px-6 py-4"><span class="text-tertiary">Platinum</span></td>
+<td class="px-6 py-4 text-secondary">42ms</td>
+<td class="px-6 py-4">
+<span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-green-900/30 text-green-400 text-xs font-bold border border-green-800/50">
+<span class="w-2 h-2 rounded-full bg-green-400 animate-pulse"></span>
+                                    活跃 (Active)
+                                </span>
+</td>
+<td class="px-6 py-4 text-right">
+<button class="text-error hover:bg-error-container/20 px-3 py-1.5 rounded-lg transition-colors font-label-mono text-label-mono">Delete</button>
+</td>
+</tr>
+<!-- Candidate Proxy 1 -->
+<tr class="hover:bg-surface-variant transition-colors">
+<td class="px-6 py-4 font-label-mono">157.240.22.35:443</td>
+<td class="px-6 py-4"><span class="bg-primary-container text-on-primary-container px-2 py-0.5 rounded text-[11px] font-bold">SOCKS5</span></td>
+<td class="px-6 py-4"><span class="text-on-surface-variant">Silver</span></td>
+<td class="px-6 py-4 text-on-surface-variant">320ms</td>
+<td class="px-6 py-4">
+<span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-yellow-900/30 text-yellow-400 text-xs font-bold border border-yellow-800/50">
+<span class="w-2 h-2 rounded-full bg-yellow-400"></span>
+                                    候选 (Candidate)
+                                </span>
+</td>
+<td class="px-6 py-4 text-right flex items-center justify-end gap-2">
+<button class="text-primary hover:bg-primary-container/20 px-3 py-1.5 rounded-lg transition-colors font-label-mono text-label-mono">Promote</button>
+<button class="text-error hover:bg-error-container/20 px-3 py-1.5 rounded-lg transition-colors font-label-mono text-label-mono">Delete</button>
+</td>
+</tr>
+<!-- Active Proxy 2 -->
+<tr class="hover:bg-surface-variant transition-colors group">
+<td class="px-6 py-4 font-label-mono">45.89.228.11:80</td>
+<td class="px-6 py-4"><span class="bg-secondary-container text-on-secondary-container px-2 py-0.5 rounded text-[11px] font-bold">HTTP</span></td>
+<td class="px-6 py-4"><span class="text-secondary">Diamond</span></td>
+<td class="px-6 py-4 text-secondary">88ms</td>
+<td class="px-6 py-4">
+<span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-green-900/30 text-green-400 text-xs font-bold border border-green-800/50">
+<span class="w-2 h-2 rounded-full bg-green-400 animate-pulse"></span>
+                                    活跃 (Active)
+                                </span>
+</td>
+<td class="px-6 py-4 text-right">
+<button class="text-error hover:bg-error-container/20 px-3 py-1.5 rounded-lg transition-colors font-label-mono text-label-mono">Delete</button>
+</td>
+</tr>
+<!-- Candidate Proxy 2 (Down) -->
+<tr class="hover:bg-surface-variant transition-colors">
+<td class="px-6 py-4 font-label-mono opacity-50">103.21.244.0:3128</td>
+<td class="px-6 py-4 opacity-50"><span class="bg-outline-variant text-on-surface-variant px-2 py-0.5 rounded text-[11px] font-bold">HTTP</span></td>
+<td class="px-6 py-4 opacity-50"><span class="text-on-surface-variant">Bronze</span></td>
+<td class="px-6 py-4 text-error">Timed Out</td>
+<td class="px-6 py-4">
+<span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-red-900/30 text-red-400 text-xs font-bold border border-red-800/50">
+<span class="w-2 h-2 rounded-full bg-red-400"></span>
+                                    离线 (Down)
+                                </span>
+</td>
+<td class="px-6 py-4 text-right flex items-center justify-end gap-2">
+<button class="text-outline-variant cursor-not-allowed px-3 py-1.5 rounded-lg font-label-mono text-label-mono" disabled="">Promote</button>
+<button class="text-error hover:bg-error-container/20 px-3 py-1.5 rounded-lg transition-colors font-label-mono text-label-mono">Delete</button>
+</td>
+</tr>
+</tbody>
+</table>
+</div>
+<div class="p-4 bg-surface-container-low flex justify-between items-center text-on-surface-variant">
+<span class="font-label-mono text-xs">显示 1-4 / 共 1,024 个代理</span>
+<div class="flex gap-2">
+<button class="p-1 hover:bg-surface-variant rounded border border-outline-variant"><span class="material-symbols-outlined text-sm" data-icon="chevron_left">chevron_left</span></button>
+<button class="p-1 hover:bg-surface-variant rounded border border-outline-variant"><span class="material-symbols-outlined text-sm" data-icon="chevron_right">chevron_right</span></button>
+</div>
+</div>
+</div>
+<!-- WARP Proxies Section -->
+<section class="mt-12">
+<div class="flex items-center gap-4 mb-6">
+<h2 class="font-headline-sm text-headline-sm text-secondary">Cloudflare WARP 节点</h2>
+<div class="h-px flex-grow bg-outline-variant"></div>
+<span class="bg-secondary/10 text-secondary border border-secondary/30 px-3 py-1 rounded-full font-label-mono text-[10px] uppercase">Special Purpose</span>
+</div>
+<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+<!-- WARP Card 1 -->
+<div class="bg-surface-container-high p-5 rounded-lg border border-secondary/30 relative overflow-hidden group">
+<div class="absolute top-0 right-0 p-2">
+<span class="material-symbols-outlined text-secondary opacity-20 group-hover:opacity-100 transition-opacity" data-icon="hub">hub</span>
+</div>
+<div class="flex flex-col gap-3">
+<div class="flex items-center justify-between">
+<span class="font-label-mono text-label-mono text-secondary">WARP-PLUS-01</span>
+<span class="text-xs text-green-400 flex items-center gap-1">
+<span class="w-1.5 h-1.5 rounded-full bg-green-400"></span>
+                                Online
+                            </span>
+</div>
+<div class="text-lg font-bold font-headline-sm">1.1.1.1:2408</div>
+<div class="grid grid-cols-2 gap-4 mt-2">
+<div class="bg-surface p-2 rounded border border-outline-variant">
+<div class="text-[10px] text-on-surface-variant uppercase font-label-mono">Ping</div>
+<div class="text-sm font-bold">12ms</div>
+</div>
+<div class="bg-surface p-2 rounded border border-outline-variant">
+<div class="text-[10px] text-on-surface-variant uppercase font-label-mono">Load</div>
+<div class="text-sm font-bold">14%</div>
+</div>
+</div>
+</div>
+</div>
+<!-- WARP Card 2 -->
+<div class="bg-surface-container-high p-5 rounded-lg border border-secondary/30 relative overflow-hidden group">
+<div class="absolute top-0 right-0 p-2">
+<span class="material-symbols-outlined text-secondary opacity-20 group-hover:opacity-100 transition-opacity" data-icon="hub">hub</span>
+</div>
+<div class="flex flex-col gap-3">
+<div class="flex items-center justify-between">
+<span class="font-label-mono text-label-mono text-secondary">WARP-US-WEST</span>
+<span class="text-xs text-green-400 flex items-center gap-1">
+<span class="w-1.5 h-1.5 rounded-full bg-green-400"></span>
+                                Online
+                            </span>
+</div>
+<div class="text-lg font-bold font-headline-sm">162.159.192.1:2408</div>
+<div class="grid grid-cols-2 gap-4 mt-2">
+<div class="bg-surface p-2 rounded border border-outline-variant">
+<div class="text-[10px] text-on-surface-variant uppercase font-label-mono">Ping</div>
+<div class="text-sm font-bold">145ms</div>
+</div>
+<div class="bg-surface p-2 rounded border border-outline-variant">
+<div class="text-[10px] text-on-surface-variant uppercase font-label-mono">Load</div>
+<div class="text-sm font-bold">62%</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</section>
+</main>
+<!-- Micro-interactions Script -->
+<script>
+        document.getElementById('theme-toggle').addEventListener('click', function() {
+            const html = document.documentElement;
+            if (html.classList.contains('dark')) {
+                html.classList.remove('dark');
+                this.querySelector('span').textContent = 'light_mode';
+            } else {
+                html.classList.add('dark');
+                this.querySelector('span').textContent = 'dark_mode';
+            }
+        });
+
+        // Simple Row Hover Effect for mobile visibility
+        document.querySelectorAll('tr').forEach(row => {
+            row.addEventListener('click', () => {
+                row.classList.toggle('bg-surface-variant');
+            });
+        });
+    </script>
+</body></html>

@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="zh-CN"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>opencode-free-gate - Logs</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;family=Geist:wght@600;800;900&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            "colors": {
+                    "on-primary-fixed": "#20005f",
+                    "outline-variant": "#494455",
+                    "error-container": "#93000a",
+                    "on-secondary-fixed-variant": "#004495",
+                    "on-tertiary-container": "#fff7f4",
+                    "surface-container": "#1e1e32",
+                    "tertiary-fixed": "#ffdbc7",
+                    "primary-fixed": "#e8deff",
+                    "primary-container": "#7c4dff",
+                    "tertiary-fixed-dim": "#ffb688",
+                    "secondary-container": "#0066da",
+                    "on-background": "#e2e0fc",
+                    "error": "#ffb4ab",
+                    "inverse-on-surface": "#2f2e43",
+                    "on-secondary": "#002e6a",
+                    "surface-variant": "#333348",
+                    "primary-fixed-dim": "#cdbdff",
+                    "outline": "#948ea1",
+                    "secondary": "#adc6ff",
+                    "on-tertiary-fixed": "#311300",
+                    "on-primary-fixed-variant": "#4f00d0",
+                    "surface-tint": "#cdbdff",
+                    "secondary-fixed": "#d8e2ff",
+                    "on-error": "#690005",
+                    "secondary-fixed-dim": "#adc6ff",
+                    "primary": "#cdbdff",
+                    "surface-container-lowest": "#0c0c1f",
+                    "surface-container-high": "#28283d",
+                    "surface-container-low": "#1a1a2e",
+                    "background": "#111125",
+                    "on-tertiary-fixed-variant": "#733600",
+                    "surface-dim": "#111125",
+                    "inverse-surface": "#e2e0fc",
+                    "on-surface": "#e2e0fc",
+                    "on-tertiary": "#512400",
+                    "on-error-container": "#ffdad6",
+                    "surface": "#111125",
+                    "surface-container-highest": "#333348",
+                    "tertiary": "#ffb688",
+                    "on-surface-variant": "#cac3d8",
+                    "on-primary": "#370096",
+                    "surface-bright": "#37374d",
+                    "tertiary-container": "#b55800",
+                    "on-secondary-container": "#e6ecff",
+                    "on-primary-container": "#fcf6ff",
+                    "inverse-primary": "#6833ea",
+                    "on-secondary-fixed": "#001a42"
+            },
+            "borderRadius": {
+                    "DEFAULT": "0.25rem",
+                    "lg": "0.5rem",
+                    "xl": "0.75rem",
+                    "full": "9999px"
+            },
+            "spacing": {
+                    "gutter": "24px",
+                    "base": "8px",
+                    "lg": "40px",
+                    "xs": "4px",
+                    "container-max": "1440px",
+                    "md": "24px",
+                    "sm": "12px",
+                    "xl": "64px"
+            },
+            "fontFamily": {
+                    "headline-lg": ["Geist"],
+                    "label-mono": ["JetBrains Mono"],
+                    "body-md": ["Inter"],
+                    "body-lg": ["Inter"],
+                    "headline-lg-mobile": ["Geist"],
+                    "headline-sm": ["Geist"],
+                    "headline-md": ["Geist"],
+                    "body-sm": ["Inter"]
+            },
+            "fontSize": {
+                    "headline-lg": ["32px", {"lineHeight": "1.2", "letterSpacing": "-0.02em", "fontWeight": "600"}],
+                    "label-mono": ["13px", {"lineHeight": "1", "letterSpacing": "0.02em", "fontWeight": "500"}],
+                    "body-md": ["14px", {"lineHeight": "1.5", "fontWeight": "400"}],
+                    "body-lg": ["16px", {"lineHeight": "1.6", "fontWeight": "400"}],
+                    "headline-lg-mobile": ["24px", {"lineHeight": "1.2", "fontWeight": "600"}],
+                    "headline-sm": ["18px", {"lineHeight": "1.4", "fontWeight": "600"}],
+                    "headline-md": ["24px", {"lineHeight": "1.3", "fontWeight": "600"}],
+                    "body-sm": ["12px", {"lineHeight": "1.5", "fontWeight": "400"}]
+            }
+          },
+        },
+      }
+    </script>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+            display: inline-block;
+            vertical-align: middle;
+        }
+        body {
+            background-color: #111125;
+            color: #e2e0fc;
+            overflow-x: hidden;
+        }
+        .terminal-scrollbar::-webkit-scrollbar {
+            width: 8px;
+        }
+        .terminal-scrollbar::-webkit-scrollbar-track {
+            background: #0c0c1f;
+        }
+        .terminal-scrollbar::-webkit-scrollbar-thumb {
+            background: #333348;
+            border-radius: 4px;
+        }
+        .terminal-scrollbar::-webkit-scrollbar-thumb:hover {
+            background: #7c4dff;
+        }
+        .log-entry:hover {
+            background-color: rgba(124, 77, 255, 0.1);
+        }
+    </style>
+</head>
+<body class="font-body-md text-body-md">
+<!-- TopNavBar -->
+<header class="fixed top-0 w-full z-50 flex justify-between items-center px-gutter h-16 bg-surface border-b border-outline-variant">
+<div class="flex items-center gap-8">
+<span class="font-headline-md text-headline-md font-bold text-primary">opencode-free-gate</span>
+<nav class="hidden lg:flex items-center gap-6">
+<a class="text-on-surface-variant hover:text-primary transition-colors" href="#">仪表盘</a>
+<a class="text-on-surface-variant hover:text-primary transition-colors" href="#">代理池</a>
+<a class="text-on-surface-variant hover:text-primary transition-colors" href="#">代理源</a>
+<a class="text-on-surface-variant hover:text-primary transition-colors" href="#">配置</a>
+<a class="text-primary border-b-2 border-primary pb-1 font-bold" href="#">Logs</a>
+</nav>
+</div>
+<div class="flex items-center gap-4">
+<button class="p-2 cursor-pointer active:opacity-80 hover:bg-surface-container-low transition-colors rounded-lg" onclick="toggleTheme()">
+<span class="material-symbols-outlined" data-icon="dark_mode">dark_mode</span>
+</button>
+<button class="p-2 cursor-pointer active:opacity-80 hover:bg-surface-container-low transition-colors rounded-lg">
+<span class="material-symbols-outlined" data-icon="notifications">notifications</span>
+</button>
+<div class="w-8 h-8 rounded-full bg-primary-container flex items-center justify-center overflow-hidden">
+<img class="w-full h-full object-cover" data-alt="A professional high-definition headshot of a user in a minimalist tech-focused environment. The lighting is dramatic and cool-toned, with soft neon purple accents reflecting off a sleek glass surface in the background. The aesthetic is clean, professional, and deeply integrated with a high-performance developer workspace theme." src="https://lh3.googleusercontent.com/aida-public/AB6AXuANqDxZ_-8FK3BYsFtnP3REcFKaorxoZ_1MrjyjAQ5cFGX9td44WSOBAs-VBt0evsHBx5IR1IWBQsYu4G_XMZAMNHIVURx_ZzNMrVV9ot1ynkshmup1C5JqL1Y0mAerAV6hzU7JuIijOyHDoB2Xh9OlTBXmpuSTvMXx7Yc0xSDsw9423zas-pp-pjg2mHHGSw8ktwHaDQoDXVUiAzLye0mtFF5QHUbj5k3L_oK0PYHodrhWw1hKIr_VoinOqY0A1fFCEHvkjPSnsHY"/>
+</div>
+</div>
+</header>
+<!-- SideNavBar (Desktop Only) -->
+<aside class="hidden md:flex flex-col fixed left-0 top-0 h-screen w-60 p-4 gap-2 bg-surface-container border-r border-outline-variant pt-20">
+<div class="mb-6 px-4">
+<div class="font-headline-sm text-headline-sm font-black text-primary">FreeGate</div>
+<div class="text-on-surface-variant text-xs opacity-70">AI Proxy Admin</div>
+</div>
+<nav class="flex-1 flex flex-col gap-1">
+<a class="flex items-center gap-3 px-4 py-2 text-on-surface-variant hover:bg-surface-variant rounded-lg transition-all scale-95 active:scale-90" href="#">
+<span class="material-symbols-outlined" data-icon="dashboard">dashboard</span>
+<span class="font-label-mono text-label-mono">仪表盘</span>
+</a>
+<a class="flex items-center gap-3 px-4 py-2 text-on-surface-variant hover:bg-surface-variant rounded-lg transition-all scale-95 active:scale-90" href="#">
+<span class="material-symbols-outlined" data-icon="rebase_edit">rebase_edit</span>
+<span class="font-label-mono text-label-mono">代理池</span>
+</a>
+<a class="flex items-center gap-3 px-4 py-2 text-on-surface-variant hover:bg-surface-variant rounded-lg transition-all scale-95 active:scale-90" href="#">
+<span class="material-symbols-outlined" data-icon="router">router</span>
+<span class="font-label-mono text-label-mono">代理源</span>
+</a>
+<a class="flex items-center gap-3 px-4 py-2 text-on-surface-variant hover:bg-surface-variant rounded-lg transition-all scale-95 active:scale-90" href="#">
+<span class="material-symbols-outlined" data-icon="settings">settings</span>
+<span class="font-label-mono text-label-mono">配置</span>
+</a>
+<a class="flex items-center gap-3 px-4 py-2 bg-primary-container text-on-primary-container font-bold rounded-lg transition-all scale-95 active:scale-90" href="#">
+<span class="material-symbols-outlined" data-icon="description">description</span>
+<span class="font-label-mono text-label-mono">日志</span>
+</a>
+</nav>
+<div class="mt-auto flex flex-col gap-1">
+<a class="flex items-center gap-3 px-4 py-2 text-on-surface-variant hover:bg-surface-variant rounded-lg transition-all scale-95 active:scale-90" href="#">
+<span class="material-symbols-outlined" data-icon="help">help</span>
+<span class="font-label-mono text-label-mono">Help</span>
+</a>
+<a class="flex items-center gap-3 px-4 py-2 text-on-surface-variant hover:bg-surface-variant rounded-lg transition-all scale-95 active:scale-90" href="#">
+<span class="material-symbols-outlined" data-icon="logout">logout</span>
+<span class="font-label-mono text-label-mono">Logout</span>
+</a>
+</div>
+</aside>
+<!-- Main Content -->
+<main class="md:ml-60 pt-24 px-gutter pb-gutter min-h-screen">
+<div class="max-w-6xl mx-auto">
+<!-- Header Section -->
+<div class="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8">
+<div>
+<h1 class="font-headline-lg text-headline-lg text-on-surface">系统日志 (Logs)</h1>
+<p class="text-on-surface-variant mt-1">实时监控代理网关运行状态与请求流水</p>
+</div>
+<div class="flex items-center gap-3">
+<button class="flex items-center gap-2 px-4 py-2 rounded-lg border border-outline-variant text-on-surface hover:bg-surface-container-high transition-colors font-medium" onclick="clearLogs()">
+<span class="material-symbols-outlined text-sm" data-icon="delete_sweep">delete_sweep</span>
+                        清空
+                    </button>
+<button class="flex items-center gap-2 px-4 py-2 rounded-lg bg-primary-container text-on-primary-container hover:opacity-90 transition-opacity font-bold shadow-lg" onclick="refreshLogs()">
+<span class="material-symbols-outlined text-sm" data-icon="refresh">refresh</span>
+                        刷新
+                    </button>
+</div>
+</div>
+<!-- Dashboard Stats Row (Subtle) -->
+<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+<div class="bg-surface-container border border-outline-variant p-4 rounded-lg">
+<div class="text-on-surface-variant text-xs font-label-mono uppercase tracking-wider mb-1">今日请求总数</div>
+<div class="text-2xl font-bold text-primary">124,592</div>
+</div>
+<div class="bg-surface-container border border-outline-variant p-4 rounded-lg">
+<div class="text-on-surface-variant text-xs font-label-mono uppercase tracking-wider mb-1">平均响应时间</div>
+<div class="text-2xl font-bold text-secondary">42ms</div>
+</div>
+<div class="bg-surface-container border border-outline-variant p-4 rounded-lg">
+<div class="text-on-surface-variant text-xs font-label-mono uppercase tracking-wider mb-1">异常报错率</div>
+<div class="text-2xl font-bold text-error">0.02%</div>
+</div>
+<div class="bg-surface-container border border-outline-variant p-4 rounded-lg">
+<div class="text-on-surface-variant text-xs font-label-mono uppercase tracking-wider mb-1">当前活跃连接</div>
+<div class="text-2xl font-bold text-tertiary">1,208</div>
+</div>
+</div>
+<!-- Terminal Component -->
+<div class="bg-surface-container-lowest border border-outline-variant rounded-lg overflow-hidden flex flex-col shadow-2xl">
+<!-- Terminal Header -->
+<div class="bg-surface-container-high px-4 py-2 border-b border-outline-variant flex items-center justify-between">
+<div class="flex items-center gap-2">
+<div class="flex gap-1.5">
+<div class="w-3 h-3 rounded-full bg-error/40"></div>
+<div class="w-3 h-3 rounded-full bg-secondary/40"></div>
+<div class="w-3 h-3 rounded-full bg-primary/40"></div>
+</div>
+<span class="ml-2 font-label-mono text-xs text-on-surface-variant opacity-80 uppercase tracking-tighter">root@freegate-proxy-cluster:~</span>
+</div>
+<div class="flex items-center gap-4 text-xs font-label-mono text-on-surface-variant">
+<span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-primary animate-pulse"></span> LIVE</span>
+<span class="opacity-50">UTF-8</span>
+</div>
+</div>
+<!-- Terminal Body -->
+<div class="terminal-scrollbar h-[600px] overflow-y-auto p-6 bg-black font-label-mono text-sm leading-relaxed selection:bg-primary selection:text-on-primary" id="log-terminal">
+<div class="space-y-1" id="log-container">
+<!-- Initial Logs -->
+<div class="log-entry flex gap-4">
+<span class="text-outline-variant shrink-0">[2023-10-24 14:20:01]</span>
+<span class="text-primary font-bold shrink-0">INFO</span>
+<span class="text-on-surface opacity-90">Initializing FreeGate Core Engine v2.4.0...</span>
+</div>
+<div class="log-entry flex gap-4">
+<span class="text-outline-variant shrink-0">[2023-10-24 14:20:02]</span>
+<span class="text-primary font-bold shrink-0">INFO</span>
+<span class="text-on-surface opacity-90">Successfully connected to Redis at 127.0.0.1:6379</span>
+</div>
+<div class="log-entry flex gap-4">
+<span class="text-outline-variant shrink-0">[2023-10-24 14:20:02]</span>
+<span class="text-secondary font-bold shrink-0">DEBUG</span>
+<span class="text-on-surface opacity-90">Loaded 1,420 proxy endpoints from database.</span>
+</div>
+<div class="log-entry flex gap-4">
+<span class="text-outline-variant shrink-0">[2023-10-24 14:20:03]</span>
+<span class="text-primary font-bold shrink-0">INFO</span>
+<span class="text-on-surface opacity-90">Proxy server listening on 0.0.0.0:8080 (HTTP)</span>
+</div>
+<div class="log-entry flex gap-4">
+<span class="text-outline-variant shrink-0">[2023-10-24 14:21:45]</span>
+<span class="text-primary font-bold shrink-0">INFO</span>
+<span class="text-on-surface opacity-90">Incoming request: GET /v1/chat/completions from user_8829</span>
+</div>
+<div class="log-entry flex gap-4">
+<span class="text-outline-variant shrink-0">[2023-10-24 14:21:46]</span>
+<span class="text-secondary font-bold shrink-0">DEBUG</span>
+<span class="text-on-surface opacity-90">Routing request to upstream: openai-api-worker-04</span>
+</div>
+<div class="log-entry flex gap-4">
+<span class="text-outline-variant shrink-0">[2023-10-24 14:22:12]</span>
+<span class="text-error font-bold shrink-0">WARN</span>
+<span class="text-on-surface opacity-90">Upstream connection timeout: proxy-node-us-west-2. Re-trying...</span>
+</div>
+<div class="log-entry flex gap-4">
+<span class="text-outline-variant shrink-0">[2023-10-24 14:22:13]</span>
+<span class="text-primary font-bold shrink-0">INFO</span>
+<span class="text-on-surface opacity-90">Failover successful. Routed to proxy-node-us-east-1.</span>
+</div>
+<div class="log-entry flex gap-4">
+<span class="text-outline-variant shrink-0">[2023-10-24 14:25:30]</span>
+<span class="text-primary font-bold shrink-0">INFO</span>
+<span class="text-on-surface opacity-90">Configuration reloaded via hot-swap.</span>
+</div>
+<div class="log-entry flex gap-4">
+<span class="text-outline-variant shrink-0">[2023-10-24 14:26:01]</span>
+<span class="text-error font-bold shrink-0">ERROR</span>
+<span class="text-on-surface opacity-90">Authentication failed for token: sk-....a2b9. IP: 192.168.1.55</span>
+</div>
+<div class="log-entry flex gap-4">
+<span class="text-outline-variant shrink-0">[2023-10-24 14:28:11]</span>
+<span class="text-primary font-bold shrink-0">INFO</span>
+<span class="text-on-surface opacity-90">Health check passed for all 5 cluster nodes.</span>
+</div>
+<!-- More logs will be appended here -->
+</div>
+</div>
+<!-- Terminal Footer/Input -->
+<div class="bg-surface-container-low px-4 py-3 flex items-center gap-3 border-t border-outline-variant">
+<span class="text-primary font-bold text-lg select-none">›</span>
+<input class="bg-transparent border-none focus:ring-0 text-sm font-label-mono w-full text-on-surface placeholder:text-outline-variant" placeholder="Filter logs or run command..." type="text"/>
+<div class="flex items-center gap-2 shrink-0">
+<span class="text-[10px] text-on-surface-variant font-label-mono border border-outline-variant px-1 rounded">CMD+K</span>
+<span class="text-[10px] text-on-surface-variant font-label-mono border border-outline-variant px-1 rounded">CTRL+L</span>
+</div>
+</div>
+</div>
+</div>
+</main>
+<script>
+        function toggleTheme() {
+            const html = document.documentElement;
+            if (html.classList.contains('dark')) {
+                html.classList.remove('dark');
+            } else {
+                html.classList.add('dark');
+            }
+        }
+
+        function clearLogs() {
+            const container = document.getElementById('log-container');
+            container.innerHTML = `
+                <div class="log-entry flex gap-4 italic opacity-50">
+                    <span class="text-outline-variant shrink-0">[${new Date().toLocaleString()}]</span>
+                    <span class="text-on-surface">Console cleared by administrator.</span>
+                </div>
+            `;
+        }
+
+        function refreshLogs() {
+            const container = document.getElementById('log-container');
+            const newLog = document.createElement('div');
+            newLog.className = 'log-entry flex gap-4 animate-pulse';
+            
+            const types = [
+                { label: 'INFO', class: 'text-primary' },
+                { label: 'DEBUG', class: 'text-secondary' },
+                { label: 'WARN', class: 'text-error' },
+                { label: 'ERROR', class: 'text-error font-extrabold' }
+            ];
+            const type = types[Math.floor(Math.random() * types.length)];
+            
+            const messages = [
+                "Handshaking with remote host...",
+                "Payload encrypted via AES-256-GCM.",
+                "Garbage collection triggered manually.",
+                "Updated internal cache (3.2MB freed).",
+                "New proxy source discovered: node-jp-tokyo-03",
+                "Anomaly detected in node-de-frankfurt-01 latency.",
+                "Successfully synchronized configuration with cluster master."
+            ];
+            const message = messages[Math.floor(Math.random() * messages.length)];
+
+            newLog.innerHTML = `
+                <span class="text-outline-variant shrink-0">[${new Date().toLocaleTimeString()}]</span>
+                <span class="${type.class} font-bold shrink-0">${type.label}</span>
+                <span class="text-on-surface opacity-90">${message}</span>
+            `;
+            
+            container.appendChild(newLog);
+            
+            const terminal = document.getElementById('log-terminal');
+            terminal.scrollTo({
+                top: terminal.scrollHeight,
+                behavior: 'smooth'
+            });
+
+            setTimeout(() => newLog.classList.remove('animate-pulse'), 1000);
+        }
+
+        // Auto-refresh simulation
+        setInterval(() => {
+            if (Math.random() > 0.7) refreshLogs();
+        }, 3000);
+    </script>
+</body></html>

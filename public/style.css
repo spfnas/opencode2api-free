@@ -1,0 +1,100 @@
+/* ═══════════════════════════════════════════════════════════
+   opencode-free-gate · Stitch Design Style
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── Base ── */
+*{margin:0;padding:0;box-sizing:border-box}
+
+html.light{color-scheme:light}
+html.dark{color-scheme:dark}
+
+body{font-family:'Inter',system-ui,sans-serif}
+
+/* ── 全局圆角统一 ── */
+body, input, select, textarea, button, table, th, td, code, pre, .tab-panel, #sidebar, header, main, aside, nav, div, span, p, h1, h2, h3, h4, h5, h6 {
+  scrollbar-width: thin;
+}
+
+/* ── Sidebar (mobile) ── */
+@media(max-width:767px){
+  #sidebar{
+    position:fixed;
+    left:0;top:0;
+    height:100%;
+    width:260px;
+    z-index:50;
+    display:flex;
+    transform:translateX(-100%);
+    transition:transform .25s ease;
+  }
+  #sidebar.open{transform:translateX(0)}
+  #mainContent{margin-left:0!important}
+}
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar{width:6px;height:6px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:#c2c6d7;border-radius:3px}
+::-webkit-scrollbar-thumb:hover{background:#727786}
+html.dark ::-webkit-scrollbar-thumb{background:#475569}
+html.dark ::-webkit-scrollbar-thumb:hover{background:#64748b}
+
+/* ── Shadows ── */
+.ambient-shadow{box-shadow:0 1px 3px rgba(0,0,0,.04),0 1px 2px rgba(0,0,0,.06)}
+html.dark .ambient-shadow{box-shadow:0 1px 3px rgba(0,0,0,.2),0 1px 2px rgba(0,0,0,.1)}
+
+/* ── Animations ── */
+@keyframes fadeUp{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+@keyframes slideIn{from{transform:translateX(-8px);opacity:0}to{transform:translateX(0);opacity:1}}
+@keyframes scaleIn{from{transform:scale(.92);opacity:0}to{transform:scale(1);opacity:1}}
+
+.animate-fade-up{animation:fadeUp .35s ease-out}
+.animate-fade-in{animation:fadeIn .25s ease-out}
+.animate-slide-in{animation:slideIn .25s ease-out}
+.animate-modal-in{animation:scaleIn .2s ease-out}
+.animate-spin{animation:spin 1s linear infinite}
+@keyframes spin{0%{transform:rotate(0)}to{transform:rotate(360deg)}}
+
+/* ── Toast ── */
+@keyframes toastIn{from{opacity:0;transform:translateY(16px) scale(.95)}to{opacity:1;transform:translateY(0) scale(1)}}
+.animate-toast-in{animation:toastIn .25s ease-out}
+
+/* ── Table ── */
+table{font-size:14px;border-collapse:separate;border-spacing:0}
+th{font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:#505f76;background:#f2f4f6;white-space:nowrap}
+th:first-child{border-radius:1rem 0 0 0}
+th:last-child{border-radius:0 1rem 0 0}
+tr:last-child td:first-child{border-radius:0 0 0 1rem}
+tr:last-child td:last-child{border-radius:0 0 1rem 0}
+td{white-space:nowrap}
+html.dark th{color:#94a3b8;background:#1e293b}
+
+/* ── Modal backdrop ── */
+#modal{display:flex;align-items:center;justify-content:center}
+#modal.hidden{display:none}
+
+/* ── Log box ── */
+#logBox{font-family:'JetBrains Mono','Fira Code',monospace;font-size:13px;line-height:1.6;tab-size:2}
+#logBox::-webkit-scrollbar{width:8px}
+#logBox::-webkit-scrollbar-track{background:#0d1117}
+#logBox::-webkit-scrollbar-thumb{background:#30363d;border-radius:4px}
+#logBox::-webkit-scrollbar-thumb:hover{background:#484f58}
+
+/* ── Skeleton pulse ── */
+@keyframes skeleton{0%{opacity:.6}50%{opacity:1}to{opacity:.6}}
+
+/* ── Select focus ring fix ── */
+select:focus,textarea:focus,input:focus{outline:none}
+
+/* ── Dark mode adjustments ── */
+html.dark .tab-panel table th{background:#1e293b}
+
+/* ── Responsive ── */
+@media(max-width:1023px){
+  #statCards,#keyCards,#auditCards,#proxyCards{grid-template-columns:repeat(2,1fr)!important}
+}
+@media(max-width:639px){
+  #statCards,#keyCards,#auditCards,#proxyCards{grid-template-columns:1fr!important}
+  main{padding:1rem!important}
+}

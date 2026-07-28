@@ -1,0 +1,17 @@
+[
+  {
+    "name": "amux",
+    "url": "https://proxy.amux.ai/api/proxies",
+    "type": "json"
+  },
+  {
+    "name": "speedx-socks5",
+    "url": "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks5.txt",
+    "type": "text"
+  },
+  {
+    "name": "333",
+    "url": "http://raw.githubusercontent.com/spfnas/tp/refs/heads/main/3.txt",
+    "type": "github"
+  }
+]

@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="zh-CN"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>代理源 - opencode-free-gate</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@500&family=Geist:wght@600;700;900&family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@100..900&family=Inter:wght@100..900&family=JetBrains+Mono:wght@100..900&display=swap" rel="stylesheet"/>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #494455;
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #7c4dff;
+        }
+    </style>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    "colors": {
+                        "on-primary-fixed": "#20005f",
+                        "outline-variant": "#494455",
+                        "error-container": "#93000a",
+                        "on-secondary-fixed-variant": "#004495",
+                        "on-tertiary-container": "#fff7f4",
+                        "surface-container": "#1e1e32",
+                        "tertiary-fixed": "#ffdbc7",
+                        "primary-fixed": "#e8deff",
+                        "primary-container": "#7c4dff",
+                        "tertiary-fixed-dim": "#ffb688",
+                        "secondary-container": "#0066da",
+                        "on-background": "#e2e0fc",
+                        "error": "#ffb4ab",
+                        "inverse-on-surface": "#2f2e43",
+                        "on-secondary": "#002e6a",
+                        "surface-variant": "#333348",
+                        "primary-fixed-dim": "#cdbdff",
+                        "outline": "#948ea1",
+                        "secondary": "#adc6ff",
+                        "on-tertiary-fixed": "#311300",
+                        "on-primary-fixed-variant": "#4f00d0",
+                        "surface-tint": "#cdbdff",
+                        "secondary-fixed": "#d8e2ff",
+                        "on-error": "#690005",
+                        "secondary-fixed-dim": "#adc6ff",
+                        "primary": "#cdbdff",
+                        "surface-container-lowest": "#0c0c1f",
+                        "surface-container-high": "#28283d",
+                        "surface-container-low": "#1a1a2e",
+                        "background": "#111125",
+                        "on-tertiary-fixed-variant": "#733600",
+                        "surface-dim": "#111125",
+                        "inverse-surface": "#e2e0fc",
+                        "on-surface": "#e2e0fc",
+                        "on-tertiary": "#512400",
+                        "on-error-container": "#ffdad6",
+                        "surface": "#111125",
+                        "surface-container-highest": "#333348",
+                        "tertiary": "#ffb688",
+                        "on-surface-variant": "#cac3d8",
+                        "on-primary": "#370096",
+                        "surface-bright": "#37374d",
+                        "tertiary-container": "#b55800",
+                        "on-secondary-container": "#e6ecff",
+                        "on-primary-container": "#fcf6ff",
+                        "inverse-primary": "#6833ea",
+                        "on-secondary-fixed": "#001a42"
+                    },
+                    "borderRadius": {
+                        "DEFAULT": "0.25rem",
+                        "lg": "0.5rem",
+                        "xl": "0.75rem",
+                        "full": "9999px"
+                    },
+                    "spacing": {
+                        "gutter": "24px",
+                        "base": "8px",
+                        "lg": "40px",
+                        "xs": "4px",
+                        "container-max": "1440px",
+                        "md": "24px",
+                        "sm": "12px",
+                        "xl": "64px"
+                    },
+                    "fontFamily": {
+                        "headline-lg": ["Geist"],
+                        "label-mono": ["JetBrains Mono"],
+                        "body-md": ["Inter"],
+                        "body-lg": ["Inter"],
+                        "headline-lg-mobile": ["Geist"],
+                        "headline-sm": ["Geist"],
+                        "headline-md": ["Geist"],
+                        "body-sm": ["Inter"]
+                    },
+                    "fontSize": {
+                        "headline-lg": ["32px", {"lineHeight": "1.2", "letterSpacing": "-0.02em", "fontWeight": "600"}],
+                        "label-mono": ["13px", {"lineHeight": "1", "letterSpacing": "0.02em", "fontWeight": "500"}],
+                        "body-md": ["14px", {"lineHeight": "1.5", "fontWeight": "400"}],
+                        "body-lg": ["16px", {"lineHeight": "1.6", "fontWeight": "400"}],
+                        "headline-lg-mobile": ["24px", {"lineHeight": "1.2", "fontWeight": "600"}],
+                        "headline-sm": ["18px", {"lineHeight": "1.4", "fontWeight": "600"}],
+                        "headline-md": ["24px", {"lineHeight": "1.3", "fontWeight": "600"}],
+                        "body-sm": ["12px", {"lineHeight": "1.5", "fontWeight": "400"}]
+                    }
+                },
+            },
+        }
+    </script>
+</head>
+<body class="bg-background text-on-surface min-h-screen">
+<!-- SideNavBar (Desktop) -->
+<aside class="hidden md:flex flex-col fixed left-0 top-0 h-screen w-60 p-4 gap-2 bg-surface-container dark:bg-surface-container border-r border-outline-variant dark:border-outline-variant z-50">
+<div class="flex items-center gap-3 mb-8 px-2">
+<div class="w-10 h-10 bg-primary-container rounded-lg flex items-center justify-center">
+<span class="material-symbols-outlined text-on-primary-container" style="font-variation-settings: 'FILL' 1;">router</span>
+</div>
+<div>
+<h1 class="font-headline-sm text-headline-sm font-black text-primary dark:text-primary leading-tight">FreeGate</h1>
+<p class="font-label-mono text-[10px] text-on-surface-variant uppercase tracking-widest">AI Proxy Admin</p>
+</div>
+</div>
+<nav class="flex flex-col gap-1">
+<a class="flex items-center gap-3 px-3 py-2 text-on-surface-variant hover:bg-surface-variant transition-all scale-95 active:scale-90 rounded-lg" href="#">
+<span class="material-symbols-outlined">dashboard</span>
+<span class="font-label-mono text-label-mono">仪表盘</span>
+</a>
+<a class="flex items-center gap-3 px-3 py-2 text-on-surface-variant hover:bg-surface-variant transition-all scale-95 active:scale-90 rounded-lg" href="#">
+<span class="material-symbols-outlined">rebase_edit</span>
+<span class="font-label-mono text-label-mono">代理池</span>
+</a>
+<a class="flex items-center gap-3 px-3 py-2 bg-primary-container dark:bg-primary-container text-on-primary-container dark:text-on-primary-container font-bold rounded-lg transition-all scale-95 active:scale-90" href="#">
+<span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 1;">router</span>
+<span class="font-label-mono text-label-mono">代理源</span>
+</a>
+<a class="flex items-center gap-3 px-3 py-2 text-on-surface-variant hover:bg-surface-variant transition-all scale-95 active:scale-90 rounded-lg" href="#">
+<span class="material-symbols-outlined">settings</span>
+<span class="font-label-mono text-label-mono">配置</span>
+</a>
+<a class="flex items-center gap-3 px-3 py-2 text-on-surface-variant hover:bg-surface-variant transition-all scale-95 active:scale-90 rounded-lg" href="#">
+<span class="material-symbols-outlined">description</span>
+<span class="font-label-mono text-label-mono">日志</span>
+</a>
+</nav>
+<div class="mt-auto flex flex-col gap-1">
+<a class="flex items-center gap-3 px-3 py-2 text-on-surface-variant hover:bg-surface-variant transition-all scale-95 active:scale-90 rounded-lg" href="#">
+<span class="material-symbols-outlined">help</span>
+<span class="font-label-mono text-label-mono">Help</span>
+</a>
+<a class="flex items-center gap-3 px-3 py-2 text-error hover:bg-error-container/20 transition-all scale-95 active:scale-90 rounded-lg" href="#">
+<span class="material-symbols-outlined">logout</span>
+<span class="font-label-mono text-label-mono">Logout</span>
+</a>
+</div>
+</aside>
+<!-- TopNavBar (Mobile/Main Content Header) -->
+<header class="fixed top-0 w-full z-40 flex justify-between items-center px-gutter h-16 bg-surface dark:bg-surface border-b border-outline-variant dark:border-outline-variant md:left-60 md:w-[calc(100%-15rem)]">
+<div class="flex items-center gap-4">
+<div class="md:hidden flex items-center">
+<span class="material-symbols-outlined text-primary cursor-pointer">menu</span>
+</div>
+<div class="hidden md:flex items-center bg-surface-container-low rounded-lg px-3 py-1.5 border border-outline-variant/30">
+<span class="material-symbols-outlined text-outline text-[20px] mr-2">search</span>
+<input class="bg-transparent border-none focus:ring-0 text-body-md font-body-md text-on-surface w-48 placeholder:text-outline" placeholder="搜索代理源..." type="text"/>
+</div>
+</div>
+<div class="flex items-center gap-4">
+<div class="cursor-pointer active:opacity-80 transition-colors p-2 hover:bg-surface-container-low rounded-full" id="theme-toggle">
+<span class="material-symbols-outlined text-primary">dark_mode</span>
+</div>
+<div class="cursor-pointer active:opacity-80 transition-colors p-2 hover:bg-surface-container-low rounded-full relative">
+<span class="material-symbols-outlined text-primary">notifications</span>
+<span class="absolute top-2 right-2 w-2 h-2 bg-error rounded-full"></span>
+</div>
+<div class="w-8 h-8 rounded-full bg-primary-container overflow-hidden border border-outline-variant">
+<img class="w-full h-full object-cover" data-alt="A clean, minimalist high-key profile avatar of a tech-savvy professional against a soft purple background. The lighting is crisp and flat, aligning with the modern interface aesthetic. High resolution, high contrast, minimalist digital design." src="https://lh3.googleusercontent.com/aida-public/AB6AXuBJD2lD6CRxCkphjxjYXRIn3CY07yyCzO5PwNHtDtQsAFw3oxVJTsIVDF4A04S3rK43oKxouwc8-eNjgkj6AXj_ZEOXMSmek1AVJl7JxC8QuzFKvxgqHRiJHzMRUDIkxxj4heEbevf6zeDW5WWBknLcc6-NOr3TjRLivzkkNG9wo4l7bv8eQL0K80hv7BwdICs7hcjra65POnsBK1Z4cjwsHdBE5Kn7pMA5BCz7E0XO80NDqeCnoIByPdVFvXw7g8rlWw2YSCzc5Pk"/>
+</div>
+</div>
+</header>
+<!-- Main Content -->
+<main class="pt-24 pb-12 px-6 md:ml-60 transition-all duration-300">
+<div class="max-w-container-max mx-auto">
+<!-- Page Header -->
+<div class="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8">
+<div>
+<h2 class="font-headline-lg text-headline-lg text-on-surface mb-1">代理源管理</h2>
+<p class="font-body-md text-body-md text-on-surface-variant">在此管理您的自动化代理获取通道和订阅源</p>
+</div>
+<button class="bg-primary-container text-on-primary-container px-6 py-2.5 rounded-lg flex items-center gap-2 font-body-md font-semibold hover:opacity-90 transition-all active:scale-95 shadow-sm">
+<span class="material-symbols-outlined">add_circle</span>
+                    添加代理源
+                </button>
+</div>
+<!-- Bento Grid Stats (Contextual Metadata) -->
+<div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
+<div class="bg-surface-container rounded-lg p-6 border border-outline-variant">
+<div class="flex justify-between items-start mb-2">
+<span class="text-on-surface-variant font-label-mono text-[12px] uppercase tracking-wider">活跃源</span>
+<span class="material-symbols-outlined text-primary">sensors</span>
+</div>
+<div class="text-3xl font-black text-on-surface">12</div>
+<div class="text-[12px] text-primary mt-2 font-label-mono">+2 新增 (24h)</div>
+</div>
+<div class="bg-surface-container rounded-lg p-6 border border-outline-variant">
+<div class="flex justify-between items-start mb-2">
+<span class="text-on-surface-variant font-label-mono text-[12px] uppercase tracking-wider">总代理数</span>
+<span class="material-symbols-outlined text-primary">public</span>
+</div>
+<div class="text-3xl font-black text-on-surface">4,281</div>
+<div class="text-[12px] text-primary mt-2 font-label-mono">有效率 94%</div>
+</div>
+<div class="bg-surface-container rounded-lg p-6 border border-outline-variant">
+<div class="flex justify-between items-start mb-2">
+<span class="text-on-surface-variant font-label-mono text-[12px] uppercase tracking-wider">异常告警</span>
+<span class="material-symbols-outlined text-error">warning</span>
+</div>
+<div class="text-3xl font-black text-on-surface">1</div>
+<div class="text-[12px] text-error mt-2 font-label-mono">1个源连接超时</div>
+</div>
+<div class="bg-surface-container rounded-lg p-6 border border-outline-variant">
+<div class="flex justify-between items-start mb-2">
+<span class="text-on-surface-variant font-label-mono text-[12px] uppercase tracking-wider">更新频率</span>
+<span class="material-symbols-outlined text-primary">update</span>
+</div>
+<div class="text-3xl font-black text-on-surface">5m</div>
+<div class="text-[12px] text-on-surface-variant mt-2 font-label-mono">平均刷新间隔</div>
+</div>
+</div>
+<!-- Main Table Section -->
+<div class="bg-surface rounded-xl border border-outline-variant overflow-hidden">
+<div class="px-6 py-4 border-b border-outline-variant bg-surface-container-low flex items-center justify-between">
+<h3 class="font-headline-sm text-headline-sm text-on-surface">所有代理源</h3>
+<div class="flex gap-2">
+<button class="p-2 hover:bg-surface-variant rounded-lg transition-colors border border-outline-variant/30">
+<span class="material-symbols-outlined text-[20px]">filter_list</span>
+</button>
+<button class="p-2 hover:bg-surface-variant rounded-lg transition-colors border border-outline-variant/30">
+<span class="material-symbols-outlined text-[20px]">refresh</span>
+</button>
+</div>
+</div>
+<div class="overflow-x-auto">
+<table class="w-full text-left border-collapse">
+<thead>
+<tr class="bg-surface-container-lowest">
+<th class="px-6 py-4 font-label-mono text-label-mono text-on-surface-variant uppercase tracking-wider">名称</th>
+<th class="px-6 py-4 font-label-mono text-label-mono text-on-surface-variant uppercase tracking-wider">类型</th>
+<th class="px-6 py-4 font-label-mono text-label-mono text-on-surface-variant uppercase tracking-wider">代理数</th>
+<th class="px-6 py-4 font-label-mono text-label-mono text-on-surface-variant uppercase tracking-wider">状态</th>
+<th class="px-6 py-4 font-label-mono text-label-mono text-on-surface-variant uppercase tracking-wider text-right">操作</th>
+</tr>
+</thead>
+<tbody class="divide-y divide-outline-variant/30">
+<!-- Row 1 -->
+<tr class="hover:bg-surface-container-low transition-colors group">
+<td class="px-6 py-4">
+<div class="flex items-center gap-3">
+<div class="w-8 h-8 rounded bg-primary/10 flex items-center justify-center">
+<span class="material-symbols-outlined text-primary text-[18px]">link</span>
+</div>
+<span class="font-body-md font-semibold text-on-surface">Global Premium Feed</span>
+</div>
+</td>
+<td class="px-6 py-4">
+<span class="px-2 py-0.5 rounded bg-surface-variant text-on-surface-variant font-label-mono text-[11px] border border-outline-variant/50">YAML SUB</span>
+</td>
+<td class="px-6 py-4">
+<span class="font-label-mono text-on-surface">1,240</span>
+</td>
+<td class="px-6 py-4">
+<div class="flex items-center gap-2">
+<span class="w-2 h-2 rounded-full bg-primary animate-pulse"></span>
+<span class="text-body-sm text-primary font-medium">Running</span>
+</div>
+</td>
+<td class="px-6 py-4 text-right">
+<div class="flex items-center justify-end gap-2">
+<button class="p-2 text-on-surface-variant hover:text-primary hover:bg-primary/10 rounded-lg transition-all">
+<span class="material-symbols-outlined text-[20px]">edit</span>
+</button>
+<button class="p-2 text-on-surface-variant hover:text-error hover:bg-error-container/20 rounded-lg transition-all">
+<span class="material-symbols-outlined text-[20px]">delete</span>
+</button>
+</div>
+</td>
+</tr>
+<!-- Row 2 -->
+<tr class="hover:bg-surface-container-low transition-colors group">
+<td class="px-6 py-4">
+<div class="flex items-center gap-3">
+<div class="w-8 h-8 rounded bg-secondary/10 flex items-center justify-center">
+<span class="material-symbols-outlined text-secondary text-[18px]">cloud_download</span>
+</div>
+<span class="font-body-md font-semibold text-on-surface">Github Raw Daily</span>
+</div>
+</td>
+<td class="px-6 py-4">
+<span class="px-2 py-0.5 rounded bg-surface-variant text-on-surface-variant font-label-mono text-[11px] border border-outline-variant/50">JSON API</span>
+</td>
+<td class="px-6 py-4">
+<span class="font-label-mono text-on-surface">856</span>
+</td>
+<td class="px-6 py-4">
+<div class="flex items-center gap-2">
+<span class="w-2 h-2 rounded-full bg-primary"></span>
+<span class="text-body-sm text-primary font-medium">Running</span>
+</div>
+</td>
+<td class="px-6 py-4 text-right">
+<div class="flex items-center justify-end gap-2">
+<button class="p-2 text-on-surface-variant hover:text-primary hover:bg-primary/10 rounded-lg transition-all">
+<span class="material-symbols-outlined text-[20px]">edit</span>
+</button>
+<button class="p-2 text-on-surface-variant hover:text-error hover:bg-error-container/20 rounded-lg transition-all">
+<span class="material-symbols-outlined text-[20px]">delete</span>
+</button>
+</div>
+</td>
+</tr>
+<!-- Row 3 (Error State) -->
+<tr class="hover:bg-surface-container-low transition-colors group bg-error-container/5">
+<td class="px-6 py-4">
+<div class="flex items-center gap-3">
+<div class="w-8 h-8 rounded bg-error/10 flex items-center justify-center">
+<span class="material-symbols-outlined text-error text-[18px]">error_outline</span>
+</div>
+<span class="font-body-md font-semibold text-on-surface">Free Scraper V3</span>
+</div>
+</td>
+<td class="px-6 py-4">
+<span class="px-2 py-0.5 rounded bg-surface-variant text-on-surface-variant font-label-mono text-[11px] border border-outline-variant/50">WEB SCRAPE</span>
+</td>
+<td class="px-6 py-4">
+<span class="font-label-mono text-on-surface">0</span>
+</td>
+<td class="px-6 py-4">
+<div class="flex items-center gap-2">
+<span class="w-2 h-2 rounded-full bg-error"></span>
+<span class="text-body-sm text-error font-medium">Connection Error</span>
+</div>
+</td>
+<td class="px-6 py-4 text-right">
+<div class="flex items-center justify-end gap-2">
+<button class="p-2 text-on-surface-variant hover:text-primary hover:bg-primary/10 rounded-lg transition-all">
+<span class="material-symbols-outlined text-[20px]">edit</span>
+</button>
+<button class="p-2 text-on-surface-variant hover:text-error hover:bg-error-container/20 rounded-lg transition-all">
+<span class="material-symbols-outlined text-[20px]">delete</span>
+</button>
+</div>
+</td>
+</tr>
+<!-- Row 4 -->
+<tr class="hover:bg-surface-container-low transition-colors group">
+<td class="px-6 py-4">
+<div class="flex items-center gap-3">
+<div class="w-8 h-8 rounded bg-tertiary/10 flex items-center justify-center">
+<span class="material-symbols-outlined text-tertiary text-[18px]">terminal</span>
+</div>
+<span class="font-body-md font-semibold text-on-surface">Local Scan - Subnet A</span>
+</div>
+</td>
+<td class="px-6 py-4">
+<span class="px-2 py-0.5 rounded bg-surface-variant text-on-surface-variant font-label-mono text-[11px] border border-outline-variant/50">IP RANGE</span>
+</td>
+<td class="px-6 py-4">
+<span class="font-label-mono text-on-surface">254</span>
+</td>
+<td class="px-6 py-4">
+<div class="flex items-center gap-2">
+<span class="w-2 h-2 rounded-full bg-outline"></span>
+<span class="text-body-sm text-on-surface-variant font-medium">Idle</span>
+</div>
+</td>
+<td class="px-6 py-4 text-right">
+<div class="flex items-center justify-end gap-2">
+<button class="p-2 text-on-surface-variant hover:text-primary hover:bg-primary/10 rounded-lg transition-all">
+<span class="material-symbols-outlined text-[20px]">edit</span>
+</button>
+<button class="p-2 text-on-surface-variant hover:text-error hover:bg-error-container/20 rounded-lg transition-all">
+<span class="material-symbols-outlined text-[20px]">delete</span>
+</button>
+</div>
+</td>
+</tr>
+</tbody>
+</table>
+</div>
+<div class="px-6 py-4 border-t border-outline-variant flex items-center justify-between bg-surface-container-low">
+<span class="text-body-sm text-on-surface-variant font-label-mono">Showing 1-4 of 12 sources</span>
+<div class="flex items-center gap-1">
+<button class="p-1.5 hover:bg-surface-variant disabled:opacity-30 disabled:cursor-not-allowed rounded transition-colors" disabled="">
+<span class="material-symbols-outlined text-[18px]">chevron_left</span>
+</button>
+<button class="w-8 h-8 bg-primary-container text-on-primary-container rounded text-body-sm font-bold">1</button>
+<button class="w-8 h-8 hover:bg-surface-variant text-on-surface rounded text-body-sm transition-colors">2</button>
+<button class="w-8 h-8 hover:bg-surface-variant text-on-surface rounded text-body-sm transition-colors">3</button>
+<button class="p-1.5 hover:bg-surface-variant rounded transition-colors">
+<span class="material-symbols-outlined text-[18px]">chevron_right</span>
+</button>
+</div>
+</div>
+</div>
+<!-- Asymmetric Info Panel -->
+<div class="mt-8 flex flex-col lg:flex-row gap-6">
+<div class="flex-1 bg-primary-container text-on-primary-container p-8 rounded-xl relative overflow-hidden">
+<div class="relative z-10">
+<h4 class="font-headline-md text-headline-md font-bold mb-2">自动化调度已开启</h4>
+<p class="font-body-md opacity-90 max-w-md">当前系统正以每 300 秒一次的频率自动轮询所有代理源。智能过滤模块将自动剔除延迟超过 2000ms 的节点。</p>
+<div class="mt-6 flex gap-4">
+<div class="bg-black/20 px-4 py-2 rounded-lg backdrop-blur-sm border border-white/10">
+<div class="text-[10px] uppercase font-label-mono opacity-70">上次运行</div>
+<div class="font-label-mono text-sm">2 分钟前</div>
+</div>
+<div class="bg-black/20 px-4 py-2 rounded-lg backdrop-blur-sm border border-white/10">
+<div class="text-[10px] uppercase font-label-mono opacity-70">CPU 占用</div>
+<div class="font-label-mono text-sm">1.2%</div>
+</div>
+</div>
+</div>
+<!-- Decorative Element -->
+<span class="material-symbols-outlined absolute -bottom-8 -right-8 text-[180px] opacity-10 rotate-12" style="font-variation-settings: 'FILL' 1;">auto_mode</span>
+</div>
+<div class="w-full lg:w-80 bg-surface-container-high rounded-xl p-6 border border-outline-variant flex flex-col justify-between">
+<div>
+<h4 class="font-label-mono text-[12px] uppercase tracking-widest text-primary mb-4">源活跃趋势</h4>
+<div class="flex items-end gap-1 h-24 mb-4">
+<div class="flex-1 bg-primary/20 rounded-t h-[40%] transition-all hover:bg-primary"></div>
+<div class="flex-1 bg-primary/20 rounded-t h-[60%] transition-all hover:bg-primary"></div>
+<div class="flex-1 bg-primary/20 rounded-t h-[30%] transition-all hover:bg-primary"></div>
+<div class="flex-1 bg-primary/20 rounded-t h-[80%] transition-all hover:bg-primary"></div>
+<div class="flex-1 bg-primary/20 rounded-t h-[50%] transition-all hover:bg-primary"></div>
+<div class="flex-1 bg-primary/20 rounded-t h-[95%] transition-all hover:bg-primary"></div>
+<div class="flex-1 bg-primary/20 rounded-t h-[70%] transition-all hover:bg-primary"></div>
+</div>
+</div>
+<button class="w-full py-2 border border-outline-variant hover:bg-surface-variant transition-colors rounded-lg font-body-sm text-on-surface">
+                        查看完整报告
+                    </button>
+</div>
+</div>
+</div>
+</main>
+<!-- BottomNavBar (Mobile Only) -->
+<nav class="md:hidden fixed bottom-0 left-0 w-full bg-surface-container h-16 flex items-center justify-around border-t border-outline-variant z-50">
+<a class="flex flex-col items-center gap-1 text-on-surface-variant active:opacity-80" href="#">
+<span class="material-symbols-outlined">dashboard</span>
+<span class="text-[10px] font-label-mono">仪表盘</span>
+</a>
+<a class="flex flex-col items-center gap-1 text-primary active:opacity-80" href="#">
+<span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 1;">router</span>
+<span class="text-[10px] font-label-mono">代理源</span>
+</a>
+<a class="flex flex-col items-center gap-1 text-on-surface-variant active:opacity-80" href="#">
+<span class="material-symbols-outlined">rebase_edit</span>
+<span class="text-[10px] font-label-mono">代理池</span>
+</a>
+<a class="flex flex-col items-center gap-1 text-on-surface-variant active:opacity-80" href="#">
+<span class="material-symbols-outlined">settings</span>
+<span class="text-[10px] font-label-mono">配置</span>
+</a>
+</nav>
+<script>
+        // Light/Dark mode toggle logic
+        const themeToggle = document.getElementById('theme-toggle');
+        const html = document.documentElement;
+        
+        themeToggle.addEventListener('click', () => {
+            if (html.classList.contains('dark')) {
+                html.classList.remove('dark');
+                themeToggle.innerHTML = '<span class="material-symbols-outlined text-primary">light_mode</span>';
+            } else {
+                html.classList.add('dark');
+                themeToggle.innerHTML = '<span class="material-symbols-outlined text-primary">dark_mode</span>';
+            }
+        });
+
+        // Add Source Micro-interaction
+        document.querySelector('button.bg-primary-container').addEventListener('click', () => {
+            console.log('Adding a new source...');
+            // In a real app, this would open a modal
+        });
+
+        // Delete Row Micro-interaction
+        document.querySelectorAll('button.hover\\:text-error').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                const row = e.target.closest('tr');
+                row.style.opacity = '0.5';
+                row.style.transform = 'translateX(20px)';
+                row.style.transition = 'all 0.3s ease';
+                setTimeout(() => {
+                    row.remove();
+                }, 300);
+            });
+        });
+    </script>
+</body></html>

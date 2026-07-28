@@ -1,0 +1,36 @@
+═══════════════════════════════════════════════════
+  opencode-free-gate — Per-Key IP Pool 反代网关
+═══════════════════════════════════════════════════
+[密钥] 已加载 1 个 API Key
+[源] 已加载 3 个代理源
+[自定义代理] 已加载 2 个
+[备用池] 已加载 20 个备用候选
+[审计] 已加载 290 条历史记录
+[启动] 加载候选代理...
+[源][amux] 3 个代理
+[源][333] 1600 个代理
+[源][speedx-socks5] 失败: This operation was aborted
+[选] 聚合 3 个源 + 2 个自定义 共 1577 个候选
+node:events:487
+      throw er; // Unhandled 'error' event
+      ^
+
+Error: listen EADDRINUSE: address already in use :::13339
+    at Server.setupListenHandle [as _listen2] (node:net:2009:16)
+    at listenInCluster (node:net:2066:12)
+    at Server.listen (node:net:2171:7)
+    at main (C:\Users\Administrator\.qwenpaw\workspaces\default\_opencode-gate\gate.ts:2242:10)
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+Emitted 'error' event on Server instance at:
+    at emitErrorNT (node:net:2045:8)
+    at process.processTicksAndRejections (node:internal/process/task_queues:90:21) {
+  code: 'EADDRINUSE',
+  errno: -4091,
+  syscall: 'listen',
+  address: '::',
+  port: 13339
+}
+
+Node.js v24.18.0
+
+C:\Users\Administrator\.qwenpaw\workspaces\default\_opencode-gate>
