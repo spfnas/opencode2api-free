@@ -290,8 +290,8 @@ async function probeReleasedCandidates(): Promise<void> {
 const UPSTREAM = 'https://opencode.ai/zen';
 const PORT = parseInt(process.env.PORT || '13339');
 const MAX_RETRIES = 3;
-const TIMEOUT = 15000;
-const STREAM_TIMEOUT = 300000;
+const TIMEOUT = 120000;
+const STREAM_TIMEOUT = 600000;
 
 const MAX_ACTIVE_KEYS = 20;
 const SLOTS_PER_KEY = 3;
@@ -1062,6 +1062,15 @@ async function rePromoteReleasedCandidates(): Promise<void> {
 //  请求转发（doHttps / doHttpsStream）
 // ═══════════════════════════════════════════════════════════
 
+function calcTimeout(body?: string): number {
+  if (!body) return TIMEOUT;
+  const size = body.length;
+  if (size > 500000) return 300000;
+  if (size > 100000) return 180000;
+  if (size > 50000) return TIMEOUT;
+  return TIMEOUT;
+}
+
 function doHttps(
   path: string, method: string, headers: Record<string, string>,
   body: string | undefined, agent?: https.Agent,
@@ -1071,7 +1080,8 @@ function doHttps(
   cleanHeaders['authorization'] = 'Bearer ';
   return new Promise((resolve, reject) => {
     const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), TIMEOUT);
+    const timeout = calcTimeout(body);
+    const timer = setTimeout(() => ac.abort(), timeout);
     const opts: any = { method, headers: cleanHeaders, signal: ac.signal, rejectUnauthorized: false };
     if (agent) opts.agent = agent;
     const req = https.request(`${UPSTREAM}${path}`, opts, (res) => {
@@ -1228,7 +1238,22 @@ async function dispatch(
     }
   }
 
-  // 没有可用 slot → fallback 链
+  // 没有可用 slot → 尝试重新分配 slot，再 fallback 链
+  if (!selectedSlot) {
+    console.log(`[调度] pool slot 耗尽, 尝试重新分配 (key ${pool.keyId.slice(0, 7)}...)`);
+    const newPool = await allocateKeySlots(pool.keyId);
+    if (newPool && newPool.slots.length > 0) {
+      pool.slots = newPool.slots;
+      pool.rrCursor = 0;
+      for (const s of pool.slots) {
+        if (!triedAddrs.has(s.addr)) { selectedSlot = s; break; }
+      }
+      if (selectedSlot) {
+        console.log(`[调度] 重新分配成功: ${selectedSlot.addr}`);
+      }
+    }
+  }
+
   if (!selectedSlot) {
     if (warpSlot && !triedAddrs.has(warpSlot.addr)) {
       console.log(`[调度] pool slot 耗尽, fallback → WARP`);
@@ -1287,7 +1312,10 @@ async function dispatch(
     } catch (e: any) {
       stats.total++; stats.errors++;
       audit(502, Date.now() - start, 'direct', path, JSON.stringify({ error: e.message }), pool.keyId);
-      return { status: 502, body: JSON.stringify({ error: 'all_proxies_failed', message: '所有代理及直连均已失败' }) };
+      const errMsg = ZENPROXY_KEY
+        ? '所有代理及直连均已失败'
+        : '所有代理及直连均已失败，建议配置 ZENPROXY_KEY 备用通道 (https://zenproxy.top)';
+      return { status: 502, body: JSON.stringify({ error: 'all_proxies_failed', message: errMsg }) };
     }
   }
 
