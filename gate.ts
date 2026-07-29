@@ -1107,9 +1107,28 @@ function doHttpsStream(
       res.on('error', () => {});
       const stream = new ReadableStream<Uint8Array>({
         start(controller) {
-          res.on('data', (chunk: Buffer) => controller.enqueue(new Uint8Array(chunk)));
-          res.on('end', () => { try { controller.close(); } catch {} });
-          res.on('error', (e: Error) => { try { controller.error(e); } catch {} });
+          let idleTimer: ReturnType<typeof setTimeout> | null = null;
+          const resetIdleTimer = () => {
+            if (idleTimer) clearTimeout(idleTimer);
+            idleTimer = setTimeout(() => {
+              console.warn(`[流] 闲置超时 (30s 无数据), 强制断开`);
+              try { controller.error(new Error('stream_idle_timeout')); } catch {}
+              res.destroy();
+            }, 30000);
+          };
+          resetIdleTimer();
+          res.on('data', (chunk: Buffer) => {
+            resetIdleTimer();
+            controller.enqueue(new Uint8Array(chunk));
+          });
+          res.on('end', () => {
+            if (idleTimer) clearTimeout(idleTimer);
+            try { controller.close(); } catch {}
+          });
+          res.on('error', (e: Error) => {
+            if (idleTimer) clearTimeout(idleTimer);
+            try { controller.error(e); } catch {}
+          });
         },
       });
       resolve({ status: res.statusCode || 200, stream, headers: resHeaders });
@@ -1195,17 +1214,6 @@ async function dispatch(
   body: string | undefined, pool: KeySlotPool,
   retry = 0, triedAddrs = new Set<string>(),
 ): Promise<{ status: number; body?: string; stream?: ReadableStream<Uint8Array>; streamHeaders?: Record<string, string> }> {
-
-  // 给模型名补 -free 后缀（上游要求带 -free 后缀的模型名才走免费额度）
-  if (body && path.includes('/chat/completions')) {
-    try {
-      const parsed = JSON.parse(body);
-      if (parsed.model && !parsed.model.endsWith('-free')) {
-        parsed.model = parsed.model + '-free';
-        body = JSON.stringify(parsed);
-      }
-    } catch {}
-  }
 
   // 选择 slot：轮询 pool.slots，跳过已尝试的
   console.log(`[调度] 尝试 slot pool: ${pool.slots.map(s => s.addr).join(', ')} | 已尝试: ${[...triedAddrs].join(', ') || '无'}`);
@@ -1595,7 +1603,7 @@ async function fetchModelsFromUpstream(): Promise<any[]> {
   });
   const freeModels = (result.data || []).filter((m: any) => m.id && m.id.endsWith('-free')).map((m: any) => ({
     ...m,
-    id: m.id.replace(/-free$/, ''),
+    id: m.id,
   }));
   cachedModels = freeModels;
   cachedModelsTime = Date.now();
@@ -2127,8 +2135,11 @@ async function fetchModelsFromUpstream(): Promise<any[]> {
             if (done) break;
             nodeRes.write(value);
           }
-        } catch {}
-        nodeRes.end();
+        } catch (e: any) {
+          console.error(`[流] 转发异常: ${e.message}`);
+          if (!nodeRes.writableEnded) nodeRes.end();
+        }
+        if (!nodeRes.writableEnded) nodeRes.end();
       } else {
         // 普通响应
         const respBody = result.body || '{}';
