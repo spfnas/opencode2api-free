@@ -35,6 +35,7 @@ interface Slot {
   proto: 'http' | 'socks5';
   latencyMs: number;
   qualityGrade: string;
+  latencies?: number[]; // 最近调用延迟样本（慢代理淘汰用）
 }
 
 interface KeySlotPool {
@@ -290,7 +291,7 @@ async function probeReleasedCandidates(): Promise<void> {
 const UPSTREAM = 'https://opencode.ai/zen';
 const PORT = parseInt(process.env.PORT || '13339');
 const MAX_RETRIES = 3;
-const TIMEOUT = 120000;
+const TIMEOUT = 60000;
 const STREAM_TIMEOUT = 600000;
 
 const MAX_ACTIVE_KEYS = 20;
@@ -298,8 +299,13 @@ const SLOTS_PER_KEY = 3;
 const POOL_CLEANUP_MS = 60000;
 const KEY_IDLE_RELEASE_MS = 600000;
 
+// 慢代理自动淘汰：slot 平均延迟超过该阈值（ms）且样本数足够时触发替换
+const SLOW_SLOT_THRESHOLD_MS = parseInt(process.env.SLOW_SLOT_THRESHOLD_MS || '10000');
+// 慢代理判定所需最少样本数（避免单次长请求误杀）
+const SLOW_SLOT_MIN_SAMPLES = 2;
+
 const PROXY_PROBE_TIMEOUT = parseInt(process.env.PROXY_PROBE_TIMEOUT || '8000');
-const PROXY_REFRESH_MS = parseInt(process.env.PROXY_REFRESH_MS || '300000');
+const PROXY_REFRESH_MS = parseInt(process.env.PROXY_REFRESH_MS || '120000');
 const TCP_FAST_CHECK_TIMEOUT = parseInt(process.env.TCP_FAST_CHECK_TIMEOUT || '2000');
 const RELEASED_CANDIDATE_PROBE_INTERVAL = parseInt(process.env.RELEASED_CANDIDATE_PROBE_INTERVAL || '120000');
 const CUSTOM_PROXIES = process.env.CUSTOM_PROXIES || '';
@@ -930,6 +936,21 @@ function releaseKeySlots(keyId: string): void {
   console.log(`[释放] Key ${keyId.slice(0,7)}... 释放 ${count} 个 slot`);
 }
 
+// 慢代理自动淘汰：记录 slot 调用延迟样本（上限 10 个，FIFO）
+function recordSlotLatency(slot: Slot, latencyMs: number): void {
+  if (!slot.latencies) slot.latencies = [];
+  slot.latencies.push(latencyMs);
+  if (slot.latencies.length > 10) slot.latencies.shift();
+}
+
+// 判断 slot 是否"慢"：样本数足够且平均延迟超阈值
+function isSlowSlot(slot: Slot): boolean {
+  const arr = slot.latencies;
+  if (!arr || arr.length < SLOW_SLOT_MIN_SAMPLES) return false;
+  const avg = arr.reduce((a, b) => a + b, 0) / arr.length;
+  return avg > SLOW_SLOT_THRESHOLD_MS;
+}
+
 function replaceFailedSlot(pool: KeySlotPool, failedAddr: string): void {
   const idx = pool.slots.findIndex(s => s.addr === failedAddr);
   if (idx >= 0) pool.slots.splice(idx, 1);
@@ -1292,13 +1313,18 @@ async function dispatch(
   retry = 0, triedAddrs = new Set<string>(),
 ): Promise<{ status: number; body?: string; stream?: ReadableStream<Uint8Array>; streamHeaders?: Record<string, string> }> {
 
-  // 选择 slot：轮询 pool.slots，跳过已尝试的
+  // 选择 slot：轮询 pool.slots，跳过已尝试的；慢代理自动淘汰（只加检测跳过，不改轮询算法）
   console.log(`[调度] 尝试 slot pool: ${pool.slots.map(s => s.addr).join(', ')} | 已尝试: ${[...triedAddrs].join(', ') || '无'}`);
   let selectedSlot: Slot | null = null;
   for (let i = 0; i < pool.slots.length; i++) {
     const idx = (pool.rrCursor + i) % pool.slots.length;
     const s = pool.slots[idx];
     if (!triedAddrs.has(s.addr)) {
+      if (isSlowSlot(s)) {
+        console.log(`[调度] ${s.addr} 平均延迟超 ${SLOW_SLOT_THRESHOLD_MS}ms, 自动替换`);
+        replaceFailedSlot(pool, s.addr);
+        continue;
+      }
       selectedSlot = s;
       pool.rrCursor = (idx + 1) % pool.slots.length;
       break;
@@ -1403,6 +1429,7 @@ async function dispatch(
       if (result.status >= 200 && result.status < 400) {
         stats.total++;
         stats.success++;
+        recordSlotLatency(selectedSlot, latencyMs);
         console.log(`[调度] ${selectedSlot.addr} stream OK ${result.status} (${latencyMs}ms) pool=${pool.keyId.slice(0,7)}...`);
         return { status: result.status, stream: result.stream, streamHeaders: result.headers };
       }
@@ -1432,6 +1459,7 @@ async function dispatch(
       if (result.status >= 200 && result.status < 400) {
         stats.total++;
         stats.success++;
+        recordSlotLatency(selectedSlot, latencyMs);
         const usage = extractUsageFromResponse(result.body);
         if (usage.tokens > 0) recordKeyUsage(pool.keyId, usage.prompt, usage.completion, usage.tokens);
         console.log(`[调度] ${selectedSlot.addr} OK ${result.status} (${latencyMs}ms) pool=${pool.keyId.slice(0,7)}...`);
