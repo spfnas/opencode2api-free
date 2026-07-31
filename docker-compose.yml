@@ -26,6 +26,9 @@ services:
       - WARP_HOST=192.168.1.201
       - WARP_SOCKS5_PORT=1080
       - API_KEY=admin123
+      - DATA_DIR=/app/data
+    volumes:
+      - ./data:/app/data
     cap_add:
       - NET_ADMIN
     networks:
