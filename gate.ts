@@ -443,8 +443,6 @@ interface ApiKeyRecord {
   createdAt: number;
   lastUsedAt: number;
   totalRequests: number;
-  promptTokens: number;
-  completionTokens: number;
   totalTokens: number;
   maxConcurrency: number;
   maxRequests: number;
@@ -466,7 +464,7 @@ function loadKeys() {
   if (!apiKeys[API_KEY]) {
     apiKeys[API_KEY] = {
       key: API_KEY, name: '默认', enabled: true, createdAt: Date.now(),
-      lastUsedAt: 0, totalRequests: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0,
+      lastUsedAt: 0, totalRequests: 0, totalTokens: 0,
       maxConcurrency: 0, maxRequests: 0, requestCount: 0, expiresAt: 0,
     };
     saveKeys();
@@ -476,9 +474,6 @@ function loadKeys() {
     if (r.maxRequests === undefined) r.maxRequests = 0;
     if (r.requestCount === undefined) r.requestCount = 0;
     if (r.expiresAt === undefined) r.expiresAt = 0;
-    if (r.promptTokens === undefined) r.promptTokens = 0;
-    if (r.completionTokens === undefined) r.completionTokens = 0;
-    if (r.totalTokens === undefined) r.totalTokens = 0;
   }
 }
 
@@ -508,15 +503,13 @@ function releaseKey(key: string) {
   if (activeRequests[key] && activeRequests[key] > 0) activeRequests[key]--;
 }
 
-function recordKeyUsage(key: string, promptTokens: number, completionTokens: number, totalTokens: number) {
+function recordKeyUsage(key: string, tokens: number) {
   const record = apiKeys[key];
   if (record) {
     record.lastUsedAt = Date.now();
     record.totalRequests++;
     record.requestCount++;
-    record.promptTokens = (record.promptTokens || 0) + (promptTokens || 0);
-    record.completionTokens = (record.completionTokens || 0) + (completionTokens || 0);
-    record.totalTokens = (record.totalTokens || 0) + (totalTokens || 0);
+    record.totalTokens += tokens;
     saveKeys();
   }
 }
@@ -1106,7 +1099,6 @@ function doHttps(
 function doHttpsStream(
   path: string, method: string, headers: Record<string, string>,
   body: string | undefined, agent?: https.Agent,
-  onUsage?: (usage: { prompt: number; completion: number; total: number }) => void,
 ): Promise<{ status: number; stream: ReadableStream<Uint8Array>; headers: Record<string, string> }> {
   const { authorization, Authorization, ...cleanHeaders } = headers;
   cleanHeaders['authorization'] = 'Bearer ';
@@ -1121,20 +1113,7 @@ function doHttpsStream(
       for (const [k, v] of Object.entries(res.headers)) {
         if (v) resHeaders[k] = Array.isArray(v) ? v[0] : v;
       }
-      // SSE usage 收集（usage 块总在流末尾，保留尾部文本足够解析）
-      let sseBuf = '';
-      const usage = { prompt: 0, completion: 0, total: 0 };
-      let usageFired = false;
-      const fireUsage = () => {
-        if (usageFired || !onUsage) return;
-        usageFired = true;
-        try {
-          parseUsageFromSse(sseBuf, usage);
-          onUsage(usage);
-        } catch {}
-      };
-      res.on('end', () => { fireUsage(); });
-      res.on('close', () => { fireUsage(); });
+      res.on('end', () => {});
       res.on('error', () => {});
       const stream = new ReadableStream<Uint8Array>({
         start(controller) {
@@ -1150,10 +1129,6 @@ function doHttpsStream(
           resetIdleTimer();
           res.on('data', (chunk: Buffer) => {
             resetIdleTimer();
-            if (onUsage) {
-              sseBuf += chunk.toString('utf-8');
-              if (sseBuf.length > 131072) sseBuf = sseBuf.slice(-131072);
-            }
             controller.enqueue(new Uint8Array(chunk));
           });
           res.on('end', () => {
@@ -1178,23 +1153,15 @@ function doHttpsStream(
 //  审计记录
 // ═══════════════════════════════════════════════════════════
 
-function audit(status: number, latencyMs: number, slotAddr: string, path: string, body?: string, keyId?: string, usageOverride?: { prompt: number; completion: number; total: number }) {
+function audit(status: number, latencyMs: number, slotAddr: string, path: string, body?: string, keyId?: string) {
   let model = '';
   let promptTokens = 0;
   let completionTokens = 0;
   let totalTokens = 0;
   let cacheCreation = 0;
   let cacheRead = 0;
-  if (usageOverride) {
-    promptTokens = usageOverride.prompt || 0;
-    completionTokens = usageOverride.completion || 0;
-    totalTokens = usageOverride.total || 0;
-    try {
-      const parsed = JSON.parse(body || '');
-      model = parsed.model || '';
-    } catch {}
-  } else if (body) {
-    try {
+  try {
+    if (body) {
       const parsed = JSON.parse(body);
       model = parsed.model || '';
       if (parsed.usage) {
@@ -1203,8 +1170,8 @@ function audit(status: number, latencyMs: number, slotAddr: string, path: string
         totalTokens = parsed.usage.total_tokens || 0;
         cacheRead = parsed.usage.prompt_cache_hit_tokens || 0;
       }
-    } catch {}
-  }
+    }
+  } catch {}
   auditLog.push({
     ts: Date.now(), keyId: keyId || 'unknown', model, promptTokens, completionTokens, totalTokens,
     cacheCreation, cacheRead, latencyMs, status, slotAddr,
@@ -1233,112 +1200,30 @@ function loadAuditLog() {
   }
 }
 
-function extractUsageFromResponse(respBody: string): { tokens: number; prompt: number; completion: number; model: string } {
+function extractUsageFromResponse(respBody: string): { tokens: number; model: string } {
   try {
     const parsed = JSON.parse(respBody);
     const model = parsed.model || '';
     const usage = parsed.usage;
     if (usage) {
-      const prompt = usage.prompt_tokens || (usage.input_tokens || 0);
-      const completion = usage.completion_tokens || (usage.output_tokens || 0);
       return {
-        tokens: usage.total_tokens || (prompt + completion),
-        prompt,
-        completion,
+        tokens: usage.total_tokens || (usage.prompt_tokens || 0) + (usage.completion_tokens || 0),
         model,
       };
     }
   } catch {}
-  // 非 JSON（SSE 流文本）→ 从 data: 行解析 usage
-  const usage = { prompt: 0, completion: 0, total: 0 };
-  parseUsageFromSse(respBody, usage);
-  return { tokens: usage.total, prompt: usage.prompt, completion: usage.completion, model: '' };
-}
-
-// 从 SSE 流文本中解析最后一个 usage 块（OpenAI 兼容格式：data: {...}）
-function parseUsageFromSse(sseText: string, usage: { prompt: number; completion: number; total: number }) {
-  try {
-    const lines = sseText.split('\n');
-    for (const line of lines) {
-      if (line.startsWith('data:')) {
-        const payload = line.slice(5).trim();
-        if (payload && payload !== '[DONE]') {
-          try {
-            const obj = JSON.parse(payload);
-            if (obj.usage) {
-              const p = obj.usage.prompt_tokens || (obj.usage.input_tokens || 0);
-              const c = obj.usage.completion_tokens || (obj.usage.output_tokens || 0);
-              usage.prompt = p;
-              usage.completion = c;
-              usage.total = obj.usage.total_tokens || (p + c);
-            }
-          } catch {}
-        }
-      }
-    }
-  } catch {}
+  return { tokens: 0, model: '' };
 }
 
 // ═══════════════════════════════════════════════════════════
 //  核心 dispatch — Per-Key Pool 路由
 // ═══════════════════════════════════════════════════════════
 
-// 模型别名 → 推理等级：<free模型>-lite/-low/-min/-mini → low；-medium/-mid → medium；-high → high；-max → max
-// -default → 不注入 effort（上游默认行为）。只对以 -free 结尾的模型开放，避免误伤真实模型名
-// 注：实测上游 API 不接受 "default" 值（400 unknown variant），"默认"= 不传 reasoning_effort
-const EFFORT_MAP: Record<string, string> = {
-  'default': 'default',
-  'lite': 'low', 'low': 'low', 'min': 'low', 'mini': 'low',
-  'medium': 'medium', 'mid': 'medium',
-  'high': 'high',
-  'max': 'max', 'xhigh': 'xhigh',
-};
-function resolveModelAlias(bodyStr: string): string {
-  try {
-    const parsed = JSON.parse(bodyStr);
-    if (!parsed || typeof parsed.model !== 'string') return bodyStr;
-    const orig = parsed.model;
-    const m = orig.match(/^(.+)-(default|lite|low|min|mini|medium|mid|high|max|xhigh)$/i);
-    if (!m) return bodyStr;
-    if (!m[1].endsWith('-free')) return bodyStr; // 仅 free 模型开放别名
-    parsed.model = m[1];
-    const effort = EFFORT_MAP[m[2].toLowerCase()];
-    if (effort === 'default') {
-      delete parsed.reasoning_effort; // 默认行为：不注入
-    } else if (parsed.reasoning_effort === undefined) {
-      parsed.reasoning_effort = effort;
-    }
-    console.log(`[别名] ${orig} → ${parsed.model} (effort=${parsed.reasoning_effort || '默认'})`);
-    return JSON.stringify(parsed);
-  } catch {
-    return bodyStr;
-  }
-}
-
-// 为 free 模型生成别名变体（/v1/models 展示）；默认行为 = 原模型名，无需 -default 后缀
-function expandModelAliases(models: any[]): any[] {
-  const out: any[] = [];
-  for (const m of models) {
-    if (m.id && m.id.endsWith('-free')) {
-      out.push({ ...m, id: m.id + '-lite' });
-      out.push({ ...m, id: m.id + '-medium' });
-      out.push({ ...m, id: m.id + '-high' });
-      out.push({ ...m, id: m.id + '-max' });
-    }
-  }
-  return out;
-}
-
 async function dispatch(
   path: string, method: string, headers: Record<string, string>,
   body: string | undefined, pool: KeySlotPool,
   retry = 0, triedAddrs = new Set<string>(),
 ): Promise<{ status: number; body?: string; stream?: ReadableStream<Uint8Array>; streamHeaders?: Record<string, string> }> {
-
-  // 模型别名解析（统一在 dispatch 入口处理，流式/非流式/重试全部生效）
-  if (body && (path.includes('/chat/completions') || path.includes('/messages'))) {
-    body = resolveModelAlias(body);
-  }
 
   // 选择 slot：轮询 pool.slots，跳过已尝试的
   console.log(`[调度] 尝试 slot pool: ${pool.slots.map(s => s.addr).join(', ')} | 已尝试: ${[...triedAddrs].join(', ') || '无'}`);
@@ -1399,16 +1284,13 @@ async function dispatch(
     const start = Date.now();
     let agent: https.Agent | undefined;
     try {
-      const isStream = (path.includes('/messages') || path.includes('/chat/completions') || path.includes('/completions')) && (headers['accept'] === 'text/event-stream' || path.includes('stream') || (body ? body.includes('"stream":true') || body.includes('"stream": true') : false));
+      const isStream = path.includes('/messages') && (headers['accept'] === 'text/event-stream' || path.includes('stream'));
       if (isStream) {
-        const result = await doHttpsStream(path, method, headers, body, undefined, (usage) => {
-          const l = Date.now() - start;
-          audit(result.status, l, 'direct', path, body, pool.keyId, usage);
-          if (usage.total > 0) recordKeyUsage(pool.keyId, usage.prompt, usage.completion, usage.total);
-        });
+        const result = await doHttpsStream(path, method, headers, body, undefined);
         const latencyMs = Date.now() - start;
         if (result.status >= 200 && result.status < 400) {
           stats.total++; stats.success++;
+          audit(result.status, latencyMs, 'direct', path, body, pool.keyId);
           return { status: result.status, stream: result.stream, streamHeaders: result.headers };
         }
         stats.total++; stats.errors++;
@@ -1420,7 +1302,7 @@ async function dispatch(
       if (result.status >= 200 && result.status < 400) {
         stats.total++; stats.success++;
         const usage = extractUsageFromResponse(result.body);
-        if (usage.tokens > 0) recordKeyUsage(pool.keyId, usage.prompt, usage.completion, usage.tokens);
+        if (usage.tokens > 0) recordKeyUsage(pool.keyId, usage.tokens);
         audit(result.status, latencyMs, 'direct', path, result.body, pool.keyId);
         return { status: result.status, body: result.body };
       }
@@ -1442,78 +1324,17 @@ async function dispatch(
   const start = Date.now();
 
   try {
-    const isStream = (path.includes('/messages') || path.includes('/chat/completions') || path.includes('/completions')) && (headers['accept'] === 'text/event-stream' || path.includes('stream') || (body ? body.includes('"stream":true') || body.includes('"stream": true') : false));
+    const isStream = path.includes('/messages') && (headers['accept'] === 'text/event-stream' || path.includes('stream'));
     if (isStream) {
-      let degraded = false;
-      const result = await doHttpsStream(path, method, headers, body, agent, (usage) => {
-        if (degraded) return;
-        const l = Date.now() - start;
-        audit(result.status, l, selectedSlot.addr, path, body, pool.keyId, usage);
-        if (usage.total > 0) recordKeyUsage(pool.keyId, usage.prompt, usage.completion, usage.total);
-      });
+      const result = await doHttpsStream(path, method, headers, body, agent);
       const latencyMs = Date.now() - start;
       if (result.status >= 200 && result.status < 400) {
-        // 预读第一个块：验证流式代理可用（部分代理 200 后立即断流）
-        const reader = result.stream.getReader();
-        try {
-          const first = await Promise.race([
-            reader.read(),
-            new Promise<never>((_, rej) => setTimeout(() => rej(new Error('first_chunk_timeout')), 20000)),
-          ]);
-          if (first.done) throw new Error('empty_stream');
-          // 流可用 → 包装（把首块放回）
-          const stream = new ReadableStream<Uint8Array>({
-            start(c) { c.enqueue(first.value); },
-            pull(c) {
-              return reader.read().then(({ done, value }) => {
-                if (done) c.close(); else c.enqueue(value);
-              }).catch((e: any) => {
-                // 上游流中断 → 标记替换该代理（流式不稳定）
-                replaceFailedSlot(pool, selectedSlot.addr);
-                console.log(`[调度] ${selectedSlot.addr} stream 中断 (${e.message}), 已替换`);
-                c.error(e);
-              });
-            },
-            cancel() {
-              reader.cancel().catch(() => {});
-              // 流中途被取消/中断 → 该代理不稳定，标记替换
-              replaceFailedSlot(pool, selectedSlot.addr);
-            },
-          });
-          stats.total++;
-          stats.success++;
-          console.log(`[调度] ${selectedSlot.addr} stream OK ${result.status} (${latencyMs}ms) pool=${pool.keyId.slice(0,7)}...`);
-          return { status: result.status, stream, streamHeaders: result.headers };
-        } catch (e: any) {
-          // 流不可用 → 标记替换该代理 + 降级为收集式（保证响应完整 + usage 可记录）
-          degraded = true;
-          console.log(`[调度] ${selectedSlot.addr} stream 首块失败 (${e.message}), 替换+降级收集式`);
-          replaceFailedSlot(pool, selectedSlot.addr);
-          const res2 = await doHttps(path, method, headers, body, agent);
-          const l2 = Date.now() - start;
-          if (res2.status >= 200 && res2.status < 400) {
-            stats.total++;
-            stats.success++;
-            const usage = extractUsageFromResponse(res2.body);
-            if (usage.tokens > 0) recordKeyUsage(pool.keyId, usage.prompt, usage.completion, usage.tokens);
-            audit(res2.status, l2, selectedSlot.addr, path, res2.body, pool.keyId);
-            return { status: res2.status, body: res2.body };
-          }
-          stats.total++;
-          if (res2.status === 429) stats.rateLimited++;
-          else stats.errors++;
-          console.error(`[调度] ${selectedSlot.addr} ${res2.status} (${l2}ms) retry=${retry}`);
-          if (res2.status === 429 || res2.status >= 500) {
-            replaceFailedSlot(pool, selectedSlot.addr);
-          }
-          audit(res2.status, l2, selectedSlot.addr, path, res2.body, pool.keyId);
-          if (retry < MAX_RETRIES) {
-            return dispatch(path, method, headers, body, pool, retry + 1, triedAddrs);
-          }
-          return { status: res2.status, body: res2.body };
-        }
+        stats.total++;
+        stats.success++;
+        console.log(`[调度] ${selectedSlot.addr} stream OK ${result.status} (${latencyMs}ms) pool=${pool.keyId.slice(0,7)}...`);
+        return { status: result.status, stream: result.stream, streamHeaders: result.headers };
       }
-      // 读取错误响应体（非 2xx；audit 已由 onUsage 完成）
+      // 读取错误响应体
       const reader = result.stream.getReader();
       let errBody = '';
       while (true) {
@@ -1528,6 +1349,7 @@ async function dispatch(
       if (result.status === 429 || result.status >= 500) {
         replaceFailedSlot(pool, selectedSlot.addr);
       }
+      audit(result.status, latencyMs, selectedSlot.addr, path, errBody, pool.keyId);
       if (retry < MAX_RETRIES) {
         return dispatch(path, method, headers, body, pool, retry + 1, triedAddrs);
       }
@@ -1539,7 +1361,7 @@ async function dispatch(
         stats.total++;
         stats.success++;
         const usage = extractUsageFromResponse(result.body);
-        if (usage.tokens > 0) recordKeyUsage(pool.keyId, usage.prompt, usage.completion, usage.tokens);
+        if (usage.tokens > 0) recordKeyUsage(pool.keyId, usage.tokens);
         console.log(`[调度] ${selectedSlot.addr} OK ${result.status} (${latencyMs}ms) pool=${pool.keyId.slice(0,7)}...`);
         audit(result.status, latencyMs, selectedSlot.addr, path, result.body, pool.keyId);
         return { status: result.status, body: result.body };
@@ -1721,7 +1543,7 @@ const server = http.createServer(async (nodeReq, nodeRes) => {
   if (pathname === '/api/audit' && method === 'GET') {
     const totalRequests = auditLog.length;
     let totalTokens = 0, totalPrompt = 0, totalCompletion = 0, cacheRead = 0;
-    const keyMap: Record<string, { name: string; key: string; requests: number; promptTokens: number; completionTokens: number; totalTokens: number; lastUsedAt: number | null }> = {};
+    const keyMap: Record<string, { name: string; key: string; requests: number; totalTokens: number; lastUsedAt: number | null }> = {};
     const modelMap: Record<string, { model: string; requests: number; promptTokens: number; completionTokens: number; totalTokens: number; cacheRead: number }> = {};
     const dayMap: Record<string, { date: string; requests: number; totalTokens: number; promptTokens: number; completionTokens: number; cacheRead: number }> = {};
 
@@ -1733,11 +1555,9 @@ const server = http.createServer(async (nodeReq, nodeRes) => {
 
       const keyId = log.keyId || 'unknown';
       if (!keyMap[keyId]) {
-        keyMap[keyId] = { name: apiKeys[keyId]?.name || 'unknown', key: keyId, requests: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0, lastUsedAt: null };
+        keyMap[keyId] = { name: 'unknown', key: keyId, requests: 0, totalTokens: 0, lastUsedAt: null };
       }
       keyMap[keyId].requests++;
-      keyMap[keyId].promptTokens += log.promptTokens || 0;
-      keyMap[keyId].completionTokens += log.completionTokens || 0;
       keyMap[keyId].totalTokens += log.totalTokens || 0;
       if (log.ts && (!keyMap[keyId].lastUsedAt || log.ts > keyMap[keyId].lastUsedAt)) {
         keyMap[keyId].lastUsedAt = log.ts;
@@ -1781,19 +1601,6 @@ const server = http.createServer(async (nodeReq, nodeRes) => {
     return;
   }
 
-  // 推荐排序（基于实测推理等级效果，效果好的排前面；对缓存/新拉取统一生效）
-  const RECOMMENDED_MODELS = [
-    'laguna-s-2.1-free', 'deepseek-v4-flash-free', 'mimo-v2.5-free',
-    'ling-3.0-flash-free', 'north-mini-code-free', 'nemotron-3-ultra-free',
-  ];
-  function sortFreeModels(models: any[]): any[] {
-    return [...models].sort((a: any, b: any) => {
-      const ia = RECOMMENDED_MODELS.indexOf(a.id);
-      const ib = RECOMMENDED_MODELS.indexOf(b.id);
-      return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
-    });
-  }
-
   // –– 从上游获取模型列表，过滤免费模型并缓存 ––
 async function fetchModelsFromUpstream(): Promise<any[]> {
   let agent: https.Agent | undefined;
@@ -1822,10 +1629,10 @@ async function fetchModelsFromUpstream(): Promise<any[]> {
     req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
     req.end();
   });
-  const freeModels = sortFreeModels((result.data || []).filter((m: any) => m.id && m.id.endsWith('-free')).map((m: any) => ({
+  const freeModels = (result.data || []).filter((m: any) => m.id && m.id.endsWith('-free')).map((m: any) => ({
     ...m,
     id: m.id,
-  })));
+  }));
   cachedModels = freeModels;
   cachedModelsTime = Date.now();
   saveModelsCache(freeModels);
@@ -1835,13 +1642,12 @@ async function fetchModelsFromUpstream(): Promise<any[]> {
 // –– API: 模型列表 ––
   if (pathname === '/api/models' && method === 'GET') {
     try {
-      let models: any[] = [];
       if (cachedModels.length > 0 && Date.now() - cachedModelsTime < 300000) {
-        models = cachedModels;
-      } else {
-        models = await fetchModelsFromUpstream();
+        sendJson(nodeRes, 200, { models: cachedModels });
+        return;
       }
-      sendJson(nodeRes, 200, { models: [...sortFreeModels(models), ...expandModelAliases(sortFreeModels(models))] });
+      const freeModels = await fetchModelsFromUpstream();
+      sendJson(nodeRes, 200, { models: freeModels });
     } catch (e: any) {
       sendJson(nodeRes, 502, { error: e.message });
     }
@@ -1858,9 +1664,7 @@ async function fetchModelsFromUpstream(): Promise<any[]> {
       createdAt: r.createdAt,
       lastUsedAt: r.lastUsedAt,
       totalRequests: r.totalRequests,
-      promptTokens: r.promptTokens || 0,
-      completionTokens: r.completionTokens || 0,
-      totalTokens: r.totalTokens || 0,
+      totalTokens: r.totalTokens,
       maxConcurrency: r.maxConcurrency,
       maxRequests: r.maxRequests,
       requestCount: r.requestCount,
@@ -1886,8 +1690,6 @@ async function fetchModelsFromUpstream(): Promise<any[]> {
         createdAt: Date.now(),
         lastUsedAt: 0,
         totalRequests: 0,
-        promptTokens: 0,
-        completionTokens: 0,
         totalTokens: 0,
         maxConcurrency: body.maxConcurrency || 0,
         maxRequests: body.maxRequests || 0,
@@ -2317,13 +2119,13 @@ async function fetchModelsFromUpstream(): Promise<any[]> {
     // 拦截 /v1/models → 返回缓存的免费模型（不需分配 slot）
     if (upstreamPath === '/v1/models' && method === 'GET') {
       try {
-        let models: any[] = [];
         if (cachedModels.length > 0 && Date.now() - cachedModelsTime < 300000) {
-          models = cachedModels;
-        } else {
-          models = await fetchModelsFromUpstream();
+          sendJson(nodeRes, 200, { object: 'list', data: cachedModels });
+          releaseKey(authKey);
+          return;
         }
-        sendJson(nodeRes, 200, { object: 'list', data: [...sortFreeModels(models), ...expandModelAliases(sortFreeModels(models))] });
+        const result = await fetchModelsFromUpstream();
+        sendJson(nodeRes, 200, { object: 'list', data: result });
         releaseKey(authKey);
         return;
       } catch (e: any) {
@@ -2363,14 +2165,14 @@ async function fetchModelsFromUpstream(): Promise<any[]> {
           }
         } catch (e: any) {
           console.error(`[流] 转发异常: ${e.message}`);
-          // 通知 dispatch：该代理流式不稳定，标记替换
-          try { await result.stream.cancel(); } catch {}
           if (!nodeRes.writableEnded) nodeRes.end();
         }
         if (!nodeRes.writableEnded) nodeRes.end();
       } else {
-        // 普通响应（usage 记录已在 dispatch 内完成）
+        // 普通响应
         const respBody = result.body || '{}';
+        const usage = extractUsageFromResponse(respBody);
+        if (usage.tokens > 0) recordKeyUsage(authKey, usage.tokens);
         nodeRes.writeHead(result.status, {
           'content-type': 'application/json',
           'access-control-allow-origin': '*',
