@@ -503,13 +503,15 @@ function releaseKey(key: string) {
   if (activeRequests[key] && activeRequests[key] > 0) activeRequests[key]--;
 }
 
-function recordKeyUsage(key: string, tokens: number) {
+function recordKeyUsage(key: string, prompt: number, completion: number, tokens: number) {
   const record = apiKeys[key];
   if (record) {
     record.lastUsedAt = Date.now();
     record.totalRequests++;
     record.requestCount++;
     record.totalTokens += tokens;
+    record.promptTokens = (record.promptTokens || 0) + prompt;
+    record.completionTokens = (record.completionTokens || 0) + completion;
     saveKeys();
   }
 }
@@ -1099,6 +1101,7 @@ function doHttps(
 function doHttpsStream(
   path: string, method: string, headers: Record<string, string>,
   body: string | undefined, agent?: https.Agent,
+  onUsage?: (usage: { prompt: number; completion: number; total: number }) => void,
 ): Promise<{ status: number; stream: ReadableStream<Uint8Array>; headers: Record<string, string> }> {
   const { authorization, Authorization, ...cleanHeaders } = headers;
   cleanHeaders['authorization'] = 'Bearer ';
@@ -1113,7 +1116,20 @@ function doHttpsStream(
       for (const [k, v] of Object.entries(res.headers)) {
         if (v) resHeaders[k] = Array.isArray(v) ? v[0] : v;
       }
-      res.on('end', () => {});
+      // SSE usage 收集（usage 块总在流末尾，保留尾部文本足够解析）
+      let sseBuf = '';
+      const usage = { prompt: 0, completion: 0, total: 0 };
+      let usageFired = false;
+      const fireUsage = () => {
+        if (usageFired || !onUsage) return;
+        usageFired = true;
+        try {
+          parseUsageFromSse(sseBuf, usage);
+          onUsage(usage);
+        } catch {}
+      };
+      res.on('end', () => { fireUsage(); });
+      res.on('close', () => { fireUsage(); });
       res.on('error', () => {});
       const stream = new ReadableStream<Uint8Array>({
         start(controller) {
@@ -1129,6 +1145,10 @@ function doHttpsStream(
           resetIdleTimer();
           res.on('data', (chunk: Buffer) => {
             resetIdleTimer();
+            if (onUsage) {
+              sseBuf += chunk.toString('utf-8');
+              if (sseBuf.length > 131072) sseBuf = sseBuf.slice(-131072);
+            }
             controller.enqueue(new Uint8Array(chunk));
           });
           res.on('end', () => {
@@ -1147,6 +1167,29 @@ function doHttpsStream(
     if (body) req.write(body);
     req.end();
   });
+}
+
+// 从 SSE 文本尾部解析 usage 块（usage 块通常在流末尾）
+function parseUsageFromSse(sseText: string, out: { prompt: number; completion: number; total: number }): void {
+  const tail = sseText.slice(-131072);
+  // 找所有 data: 行，从后往前找含 usage 的 JSON
+  const lines = tail.split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    if (!line.startsWith('data:')) continue;
+    const payload = line.slice(5).trim();
+    if (payload === '[DONE]') continue;
+    try {
+      const obj = JSON.parse(payload);
+      const u = obj.usage;
+      if (u) {
+        out.prompt = u.prompt_tokens || u.input_tokens || u.inputTokens || 0;
+        out.completion = u.completion_tokens || u.output_tokens || u.outputTokens || 0;
+        out.total = u.total_tokens || out.prompt + out.completion;
+        return;
+      }
+    } catch {}
+  }
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -1200,19 +1243,43 @@ function loadAuditLog() {
   }
 }
 
-function extractUsageFromResponse(respBody: string): { tokens: number; model: string } {
+function extractUsageFromResponse(respBody: string): { tokens: number; prompt: number; completion: number; model: string } {
   try {
     const parsed = JSON.parse(respBody);
     const model = parsed.model || '';
     const usage = parsed.usage;
     if (usage) {
+      const prompt = usage.prompt_tokens || usage.input_tokens || usage.inputTokens || 0;
+      const completion = usage.completion_tokens || usage.output_tokens || usage.outputTokens || 0;
       return {
-        tokens: usage.total_tokens || (usage.prompt_tokens || 0) + (usage.completion_tokens || 0),
+        tokens: usage.total_tokens || prompt + completion,
+        prompt,
+        completion,
         model,
       };
     }
   } catch {}
-  return { tokens: 0, model: '' };
+  // SSE 文本降级：usage 块总在流末尾，从尾部找含 usage 的 data 行
+  try {
+    const tail = respBody.slice(-131072);
+    const lines = tail.split('\n');
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i].trim();
+      if (!line.startsWith('data:')) continue;
+      const payload = line.slice(5).trim();
+      if (payload === '[DONE]') continue;
+      try {
+        const obj = JSON.parse(payload);
+        const usage = obj.usage;
+        if (usage) {
+          const prompt = usage.prompt_tokens || usage.input_tokens || usage.inputTokens || 0;
+          const completion = usage.completion_tokens || usage.output_tokens || usage.outputTokens || 0;
+          return { tokens: usage.total_tokens || prompt + completion, prompt, completion, model: obj.model || '' };
+        }
+      } catch {}
+    }
+  } catch {}
+  return { tokens: 0, prompt: 0, completion: 0, model: '' };
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -1302,7 +1369,7 @@ async function dispatch(
       if (result.status >= 200 && result.status < 400) {
         stats.total++; stats.success++;
         const usage = extractUsageFromResponse(result.body);
-        if (usage.tokens > 0) recordKeyUsage(pool.keyId, usage.tokens);
+        if (usage.tokens > 0) recordKeyUsage(pool.keyId, usage.prompt, usage.completion, usage.tokens);
         audit(result.status, latencyMs, 'direct', path, result.body, pool.keyId);
         return { status: result.status, body: result.body };
       }
@@ -1326,7 +1393,12 @@ async function dispatch(
   try {
     const isStream = path.includes('/messages') && (headers['accept'] === 'text/event-stream' || path.includes('stream'));
     if (isStream) {
-      const result = await doHttpsStream(path, method, headers, body, agent);
+      const result = await doHttpsStream(path, method, headers, body, agent, (usage) => {
+        // SSE 流结束收集 usage（仅统计，不涉及调度）
+        const l = Date.now() - start;
+        audit(result.status, l, selectedSlot.addr, path, body, pool.keyId);
+        if (usage.total > 0) recordKeyUsage(pool.keyId, usage.prompt, usage.completion, usage.total);
+      });
       const latencyMs = Date.now() - start;
       if (result.status >= 200 && result.status < 400) {
         stats.total++;
@@ -1361,7 +1433,7 @@ async function dispatch(
         stats.total++;
         stats.success++;
         const usage = extractUsageFromResponse(result.body);
-        if (usage.tokens > 0) recordKeyUsage(pool.keyId, usage.tokens);
+        if (usage.tokens > 0) recordKeyUsage(pool.keyId, usage.prompt, usage.completion, usage.tokens);
         console.log(`[调度] ${selectedSlot.addr} OK ${result.status} (${latencyMs}ms) pool=${pool.keyId.slice(0,7)}...`);
         audit(result.status, latencyMs, selectedSlot.addr, path, result.body, pool.keyId);
         return { status: result.status, body: result.body };
@@ -1543,7 +1615,7 @@ const server = http.createServer(async (nodeReq, nodeRes) => {
   if (pathname === '/api/audit' && method === 'GET') {
     const totalRequests = auditLog.length;
     let totalTokens = 0, totalPrompt = 0, totalCompletion = 0, cacheRead = 0;
-    const keyMap: Record<string, { name: string; key: string; requests: number; totalTokens: number; lastUsedAt: number | null }> = {};
+    const keyMap: Record<string, { name: string; key: string; requests: number; totalTokens: number; promptTokens: number; completionTokens: number; lastUsedAt: number | null }> = {};
     const modelMap: Record<string, { model: string; requests: number; promptTokens: number; completionTokens: number; totalTokens: number; cacheRead: number }> = {};
     const dayMap: Record<string, { date: string; requests: number; totalTokens: number; promptTokens: number; completionTokens: number; cacheRead: number }> = {};
 
@@ -1555,10 +1627,12 @@ const server = http.createServer(async (nodeReq, nodeRes) => {
 
       const keyId = log.keyId || 'unknown';
       if (!keyMap[keyId]) {
-        keyMap[keyId] = { name: 'unknown', key: keyId, requests: 0, totalTokens: 0, lastUsedAt: null };
+        keyMap[keyId] = { name: 'unknown', key: keyId, requests: 0, totalTokens: 0, promptTokens: 0, completionTokens: 0, lastUsedAt: null };
       }
       keyMap[keyId].requests++;
       keyMap[keyId].totalTokens += log.totalTokens || 0;
+      keyMap[keyId].promptTokens += log.promptTokens || 0;
+      keyMap[keyId].completionTokens += log.completionTokens || 0;
       if (log.ts && (!keyMap[keyId].lastUsedAt || log.ts > keyMap[keyId].lastUsedAt)) {
         keyMap[keyId].lastUsedAt = log.ts;
       }
@@ -1665,6 +1739,8 @@ async function fetchModelsFromUpstream(): Promise<any[]> {
       lastUsedAt: r.lastUsedAt,
       totalRequests: r.totalRequests,
       totalTokens: r.totalTokens,
+      promptTokens: r.promptTokens || 0,
+      completionTokens: r.completionTokens || 0,
       maxConcurrency: r.maxConcurrency,
       maxRequests: r.maxRequests,
       requestCount: r.requestCount,
@@ -1691,6 +1767,8 @@ async function fetchModelsFromUpstream(): Promise<any[]> {
         lastUsedAt: 0,
         totalRequests: 0,
         totalTokens: 0,
+        promptTokens: 0,
+        completionTokens: 0,
         maxConcurrency: body.maxConcurrency || 0,
         maxRequests: body.maxRequests || 0,
         requestCount: 0,
@@ -2169,10 +2247,8 @@ async function fetchModelsFromUpstream(): Promise<any[]> {
         }
         if (!nodeRes.writableEnded) nodeRes.end();
       } else {
-        // 普通响应
+        // 普通响应（usage 记录已在 dispatch 内完成，防止双计）
         const respBody = result.body || '{}';
-        const usage = extractUsageFromResponse(respBody);
-        if (usage.tokens > 0) recordKeyUsage(authKey, usage.tokens);
         nodeRes.writeHead(result.status, {
           'content-type': 'application/json',
           'access-control-allow-origin': '*',
