@@ -175,7 +175,13 @@ async function fetchModels() {
   try {
     const s = await api('/api/models');
     const el = $('testModel'); if(!el) return;
+    const prev = el.value || localStorage.getItem('lastTestModel') || '';
     el.innerHTML = s.models && s.models.length ? s.models.map(m => `<option value="${esc(m.id)}">${esc(m.id)}</option>`).join('') : '<option>无可用模型</option>';
+    if (prev && s.models && s.models.some(m => m.id === prev)) {
+      el.value = prev;
+    }
+    localStorage.setItem('lastTestModel', el.value || '');
+    el.addEventListener('change', () => localStorage.setItem('lastTestModel', el.value));
   } catch(_) { const el = $('testModel'); if(el) el.innerHTML = '<option>加载失败</option>'; }
 }
 
