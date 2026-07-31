@@ -1286,11 +1286,65 @@ function extractUsageFromResponse(respBody: string): { tokens: number; prompt: n
 //  核心 dispatch — Per-Key Pool 路由
 // ═══════════════════════════════════════════════════════════
 
+// ═══════════════════════════════════════════════════════════
+//  模型别名 → 推理等级（纯模型名处理，不涉及代理调度）
+// ═══════════════════════════════════════════════════════════
+// <free模型>-lite/-low/-min/-mini → low；-medium/-mid → medium；-high → high；-max/-xhigh → max/xhigh
+// -default → 不注入 effort（上游默认行为）。只对以 -free 结尾的模型开放，避免误伤真实模型名
+// 注：实测上游 API 不接受 "default" 值（400 unknown variant），"默认"= 不传 reasoning_effort
+const EFFORT_MAP: Record<string, string> = {
+  'default': 'default',
+  'lite': 'low', 'low': 'low', 'min': 'low', 'mini': 'low',
+  'medium': 'medium', 'mid': 'medium',
+  'high': 'high',
+  'max': 'max', 'xhigh': 'xhigh',
+};
+function resolveModelAlias(bodyStr: string): string {
+  try {
+    const parsed = JSON.parse(bodyStr);
+    if (!parsed || typeof parsed.model !== 'string') return bodyStr;
+    const orig = parsed.model;
+    const m = orig.match(/^(.+)-(default|lite|low|min|mini|medium|mid|high|max|xhigh)$/i);
+    if (!m) return bodyStr;
+    if (!m[1].endsWith('-free')) return bodyStr; // 仅 free 模型开放别名
+    parsed.model = m[1];
+    const effort = EFFORT_MAP[m[2].toLowerCase()];
+    if (effort === 'default') {
+      delete parsed.reasoning_effort; // 默认行为：不注入
+    } else if (parsed.reasoning_effort === undefined) {
+      parsed.reasoning_effort = effort;
+    }
+    console.log(`[别名] ${orig} → ${parsed.model} (effort=${parsed.reasoning_effort || '默认'})`);
+    return JSON.stringify(parsed);
+  } catch {
+    return bodyStr;
+  }
+}
+
+// 为 free 模型生成别名变体（/v1/models 展示）；默认行为 = 原模型名，无需 -default 后缀
+function expandModelAliases(models: any[]): any[] {
+  const out: any[] = [];
+  for (const m of models) {
+    if (m.id && m.id.endsWith('-free')) {
+      out.push({ ...m, id: m.id + '-lite' });
+      out.push({ ...m, id: m.id + '-medium' });
+      out.push({ ...m, id: m.id + '-high' });
+      out.push({ ...m, id: m.id + '-max' });
+    }
+  }
+  return out;
+}
+
 async function dispatch(
   path: string, method: string, headers: Record<string, string>,
   body: string | undefined, pool: KeySlotPool,
   retry = 0, triedAddrs = new Set<string>(),
 ): Promise<{ status: number; body?: string; stream?: ReadableStream<Uint8Array>; streamHeaders?: Record<string, string> }> {
+
+  // 模型别名解析（统一在 dispatch 入口处理，流式/非流式/重试全部生效）
+  if (body && (path.includes('/chat/completions') || path.includes('/messages'))) {
+    body = resolveModelAlias(body);
+  }
 
   // 选择 slot：轮询 pool.slots，跳过已尝试的
   console.log(`[调度] 尝试 slot pool: ${pool.slots.map(s => s.addr).join(', ')} | 已尝试: ${[...triedAddrs].join(', ') || '无'}`);
@@ -1717,11 +1771,11 @@ async function fetchModelsFromUpstream(): Promise<any[]> {
   if (pathname === '/api/models' && method === 'GET') {
     try {
       if (cachedModels.length > 0 && Date.now() - cachedModelsTime < 300000) {
-        sendJson(nodeRes, 200, { models: cachedModels });
+        sendJson(nodeRes, 200, { models: [...cachedModels, ...expandModelAliases(cachedModels)] });
         return;
       }
       const freeModels = await fetchModelsFromUpstream();
-      sendJson(nodeRes, 200, { models: freeModels });
+      sendJson(nodeRes, 200, { models: [...freeModels, ...expandModelAliases(freeModels)] });
     } catch (e: any) {
       sendJson(nodeRes, 502, { error: e.message });
     }
@@ -2198,12 +2252,12 @@ async function fetchModelsFromUpstream(): Promise<any[]> {
     if (upstreamPath === '/v1/models' && method === 'GET') {
       try {
         if (cachedModels.length > 0 && Date.now() - cachedModelsTime < 300000) {
-          sendJson(nodeRes, 200, { object: 'list', data: cachedModels });
+          sendJson(nodeRes, 200, { object: 'list', data: [...cachedModels, ...expandModelAliases(cachedModels)] });
           releaseKey(authKey);
           return;
         }
         const result = await fetchModelsFromUpstream();
-        sendJson(nodeRes, 200, { object: 'list', data: result });
+        sendJson(nodeRes, 200, { object: 'list', data: [...result, ...expandModelAliases(result)] });
         releaseKey(authKey);
         return;
       } catch (e: any) {
