@@ -47,10 +47,6 @@ interface KeySlotPool {
 
 interface CandidateItem extends ProxyItem {
   lockedBy: string | null;
-  // 429 熔断 + 冷却状态（移植自 OpenCodeProxyHub）
-  consecutiveRateLimitCount?: number;  // 连续 429 计数
-  cooldownUntil?: number;              // 冷却截止时间戳（非 429 失败）
-  disabled429?: boolean;               // 连续 5 次 429 后禁用
 }
 
 interface ReleasedCandidateItem {
@@ -61,9 +57,6 @@ interface ReleasedCandidateItem {
   lastSucceededAt: number;
   consecutiveFailures: number;
   consecutiveSuccesses: number;
-  // 429 熔断 + 冷却状态（移植自 OpenCodeProxyHub）
-  disabled429?: boolean;
-  cooldownUntil?: number;
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -215,13 +208,11 @@ function saveReleasedCandidates() {
   }
 }
 
-function addReleasedCandidate(item: ProxyItem & { lockedBy?: string | null; disabled429?: boolean; cooldownUntil?: number }) {
+function addReleasedCandidate(item: ProxyItem & { lockedBy?: string | null }) {
   const existing = releasedCandidates.find(r => r.address === item.address);
   if (existing) {
     existing.lastFailedAt = Date.now();
     existing.consecutiveFailures++;
-    existing.disabled429 = item.disabled429;
-    existing.cooldownUntil = item.cooldownUntil;
   } else {
     releasedCandidates.push({
       address: item.address,
@@ -231,8 +222,6 @@ function addReleasedCandidate(item: ProxyItem & { lockedBy?: string | null; disa
       lastSucceededAt: 0,
       consecutiveFailures: 1,
       consecutiveSuccesses: 0,
-      disabled429: item.disabled429,
-      cooldownUntil: item.cooldownUntil,
     });
   }
   saveReleasedCandidates();
@@ -314,13 +303,6 @@ const KEY_IDLE_RELEASE_MS = 600000;
 const SLOW_SLOT_THRESHOLD_MS = parseInt(process.env.SLOW_SLOT_THRESHOLD_MS || '10000');
 // 慢代理判定所需最少样本数（避免单次长请求误杀）
 const SLOW_SLOT_MIN_SAMPLES = 2;
-
-// ═══════════════════════════════════════════════════════════
-//  429 熔断 + 冷却（移植自 OpenCodeProxyHub）
-//  ═══════════════════════════════════════════════════════════
-const RATE_LIMIT_DISABLE_THRESHOLD = 5;      // 连续 5 次 429 自动禁用节点
-const FAILURE_COOLDOWN_MS = 5 * 60 * 1000;    // 非 429 失败冷却 5 分钟
-const RATE_LIMIT_SHORT_COOLDOWN_MS = 60 * 1000; // 429 未达阈值时的短冷却（1 分钟）
 
 const PROXY_PROBE_TIMEOUT = parseInt(process.env.PROXY_PROBE_TIMEOUT || '8000');
 const PROXY_REFRESH_MS = parseInt(process.env.PROXY_REFRESH_MS || '120000');
@@ -729,22 +711,10 @@ async function loadCandidates(): Promise<void> {
     return (a.latency || 999) - (b.latency || 999);
   });
   const oldLocked = new Map<string, string>();
-  const oldCircuit = new Map<string, { consecutiveRateLimitCount?: number; cooldownUntil?: number; disabled429?: boolean }>();
-  for (const c of candidates) {
-    if (c.lockedBy) oldLocked.set(c.address, c.lockedBy);
-    // 保留 429 熔断 + 冷却状态（移植自 OpenCodeProxyHub）
-    if (c.consecutiveRateLimitCount || c.cooldownUntil || c.disabled429) {
-      oldCircuit.set(c.address, {
-        consecutiveRateLimitCount: c.consecutiveRateLimitCount,
-        cooldownUntil: c.cooldownUntil,
-        disabled429: c.disabled429,
-      });
-    }
-  }
+  for (const c of candidates) { if (c.lockedBy) oldLocked.set(c.address, c.lockedBy); }
   candidates = all.map(item => ({
     ...item,
     lockedBy: oldLocked.get(item.address) || null,
-    ...(oldCircuit.get(item.address) || {}),
   }));
   const srcCount = proxySources.length;
   console.log(`[选] 聚合 ${srcCount} 个源`, customProxyItems.length > 0 ? `+ ${customProxyItems.length} 个自定义` : '', `共 ${candidates.length} 个候选`);
@@ -896,7 +866,7 @@ async function allocateKeySlots(keyId: string): Promise<KeySlotPool | null> {
   const existingPool = keySlotPools.get(keyId);
   if (existingPool) { for (const s of existingPool.slots) usedAddrs.add(s.addr); }
 
-  const available = candidates.filter(c => !c.lockedBy && !usedAddrs.has(c.address) && isCandidateAvailable(c));
+  const available = candidates.filter(c => !c.lockedBy && !usedAddrs.has(c.address));
   const gradeOrder: Record<string, number> = { S: 0, A: 1, B: 2, C: 3 };
   available.sort((a, b) => {
     const ga = gradeOrder[a.quality_grade] ?? 99;
@@ -982,69 +952,24 @@ function isSlowSlot(slot: Slot): boolean {
   return avg > SLOW_SLOT_THRESHOLD_MS;
 }
 
-// ═══════════════════════════════════════════════════════════
-//  429 熔断 + 冷却（移植自 OpenCodeProxyHub）
-//  ═══════════════════════════════════════════════════════════
-
-// 候选是否可用：未被 429 禁用、未在冷却期内
-function isCandidateAvailable(c: CandidateItem): boolean {
-  if (c.disabled429) return false;
-  if (c.cooldownUntil && Date.now() < c.cooldownUntil) return false;
-  return true;
-}
-
-// 节点失败记账：429 连续计数 → 达阈值禁用；其他失败 → 冷却 5 分钟
-function markCandidateFailure(c: CandidateItem, statusCode: number): void {
-  if (statusCode === 429) {
-    c.consecutiveRateLimitCount = (c.consecutiveRateLimitCount || 0) + 1;
-    if (c.consecutiveRateLimitCount >= RATE_LIMIT_DISABLE_THRESHOLD) {
-      c.disabled429 = true;
-      c.cooldownUntil = undefined;
-      console.log(`[熔断] ${c.address} 连续 ${c.consecutiveRateLimitCount} 次 429，已禁用`);
-    } else {
-      // 429 也先拉黑一段时间，避免马上被重新选中（配合连续计数熔断）
-      c.cooldownUntil = Date.now() + RATE_LIMIT_SHORT_COOLDOWN_MS;
-      console.log(`[429] ${c.address} 连续 ${c.consecutiveRateLimitCount}/${RATE_LIMIT_DISABLE_THRESHOLD} 次 429，冷却 ${RATE_LIMIT_SHORT_COOLDOWN_MS / 1000}s`);
-    }
-  } else {
-    c.cooldownUntil = Date.now() + FAILURE_COOLDOWN_MS;
-    c.consecutiveRateLimitCount = 0;
-    console.log(`[冷却] ${c.address} 失败(${statusCode})，冷却 ${FAILURE_COOLDOWN_MS / 60000} 分钟`);
-  }
-}
-
-// 节点成功记账：重置 429 计数与冷却
-function markCandidateSuccess(c: CandidateItem): void {
-  if (c.consecutiveRateLimitCount || c.cooldownUntil || c.disabled429) {
-    c.consecutiveRateLimitCount = 0;
-    c.cooldownUntil = undefined;
-    console.log(`[恢复] ${c.address} 成功，解除熔断/冷却`);
-  }
-}
-
-function replaceFailedSlot(pool: KeySlotPool, failedAddr: string, statusCode = 0): void {
+function replaceFailedSlot(pool: KeySlotPool, failedAddr: string): void {
   const idx = pool.slots.findIndex(s => s.addr === failedAddr);
   if (idx >= 0) pool.slots.splice(idx, 1);
   const failedCand = candidates.find(c => c.address === failedAddr);
   if (failedCand) {
     failedCand.lockedBy = null;
-    // 429 熔断/失败记账（移植自 OpenCodeProxyHub）
-    if (statusCode !== 0) markCandidateFailure(failedCand, statusCode);
-    // 未被 429 熔断的失败节点才放入备用候选池（熔断节点不再回流，需手动重启恢复）
-    if (!failedCand.disabled429) {
-      addReleasedCandidate(failedCand);
-    }
+    // 放入备用候选池
+    addReleasedCandidate(failedCand);
   }
 
   const lockedAddrs = new Set(pool.slots.map(s => s.addr));
   // 从前 20 个高质量(排序靠前)未锁定候选中随机挑一个，避免死磕同一个节点
-  // 过滤掉已禁用/冷却中的节点（429 熔断 + 冷却机制）
-  const avail = candidates.filter(c => !c.lockedBy && !lockedAddrs.has(c.address) && isCandidateAvailable(c));
+  const avail = candidates.filter(c => !c.lockedBy && !lockedAddrs.has(c.address));
   const poolSlice = avail.slice(0, 20);
   const replacement = poolSlice.length > 0 ? poolSlice[Math.floor(Math.random() * poolSlice.length)] : null;
   if (!replacement) {
-    // 如果活跃候选池没有，从备用池尝试提拔（跳过熔断/冷却中的节点）
-    const backupReplacement = releasedCandidates.find(r => r.consecutiveSuccesses >= 2 && !r.disabled429 && !(r.cooldownUntil && Date.now() < r.cooldownUntil) && !pool.slots.some(s => s.addr === r.address));
+    // 如果活跃候选池没有，从备用池尝试提拔
+    const backupReplacement = releasedCandidates.find(r => r.consecutiveSuccesses >= 2 && !pool.slots.some(s => s.addr === r.address));
     if (backupReplacement) {
       probe(backupReplacement).then(r => {
         if (r.ok) {
@@ -1129,9 +1054,6 @@ async function refreshCandidates(): Promise<void> {
 async function rePromoteReleasedCandidates(): Promise<void> {
   const now = Date.now();
   for (const rc of releasedCandidates) {
-    // 429 熔断节点不参与回流；冷却期内的节点跳过本次回流
-    if (rc.disabled429) continue;
-    if (rc.cooldownUntil && now < rc.cooldownUntil) continue;
     try {
       const proxyItem: ProxyItem = { address: rc.address, protocol: rc.protocol, latency: 999, quality_grade: rc.quality_grade };
       const r = await probe(proxyItem);
@@ -1153,9 +1075,6 @@ async function rePromoteReleasedCandidates(): Promise<void> {
             });
             console.log(`[备用池→活跃] ${rc.address} 已重新加入候选池`);
           }
-          // 探活成功，解除冷却/熔断标记
-          rc.disabled429 = false;
-          rc.cooldownUntil = undefined;
         }
       } else {
         rc.consecutiveFailures++;
@@ -1516,9 +1435,6 @@ async function dispatch(
         stats.success++;
         recordSlotLatency(selectedSlot, latencyMs);
         console.log(`[调度] ${selectedSlot.addr} stream OK ${result.status} (${latencyMs}ms) pool=${pool.keyId.slice(0,7)}...`);
-        // 成功：解除该节点的熔断/冷却状态
-        const okCand = candidates.find(c => c.address === selectedSlot.addr);
-        if (okCand) markCandidateSuccess(okCand);
         return { status: result.status, stream: result.stream, streamHeaders: result.headers };
       }
       // 读取错误响应体
@@ -1534,7 +1450,7 @@ async function dispatch(
       else stats.errors++;
       console.error(`[调度] ${selectedSlot.addr} stream ${result.status} (${latencyMs}ms) retry=${retry}`);
       if (result.status === 429 || result.status >= 500) {
-        replaceFailedSlot(pool, selectedSlot.addr, result.status);
+        replaceFailedSlot(pool, selectedSlot.addr);
       }
       audit(result.status, latencyMs, selectedSlot.addr, path, errBody, pool.keyId);
       if (retry < MAX_RETRIES) {
@@ -1551,9 +1467,6 @@ async function dispatch(
         const usage = extractUsageFromResponse(result.body);
         if (usage.tokens > 0) recordKeyUsage(pool.keyId, usage.prompt, usage.completion, usage.tokens);
         console.log(`[调度] ${selectedSlot.addr} OK ${result.status} (${latencyMs}ms) pool=${pool.keyId.slice(0,7)}...`);
-        // 成功：解除该节点的熔断/冷却状态
-        const okCand = candidates.find(c => c.address === selectedSlot.addr);
-        if (okCand) markCandidateSuccess(okCand);
         audit(result.status, latencyMs, selectedSlot.addr, path, result.body, pool.keyId);
         return { status: result.status, body: result.body };
       }
@@ -1562,7 +1475,7 @@ async function dispatch(
       else stats.errors++;
       console.error(`[调度] ${selectedSlot.addr} ${result.status} (${latencyMs}ms) retry=${retry}`);
       if (result.status === 429 || result.status >= 500) {
-        replaceFailedSlot(pool, selectedSlot.addr, result.status);
+        replaceFailedSlot(pool, selectedSlot.addr);
       }
       audit(result.status, latencyMs, selectedSlot.addr, path, result.body, pool.keyId);
       if (retry < MAX_RETRIES) {
@@ -1574,8 +1487,7 @@ async function dispatch(
     stats.total++;
     stats.errors++;
     console.error(`[调度] ${selectedSlot.addr} 异常: ${e.message} retry=${retry}`);
-    // 网络异常按 502 处理（非 429 → 走冷却而非熔断）
-    replaceFailedSlot(pool, selectedSlot.addr, 502);
+    replaceFailedSlot(pool, selectedSlot.addr);
     audit(502, Date.now() - start, selectedSlot.addr, path, JSON.stringify({ error: e.message }), pool.keyId);
     if (retry < MAX_RETRIES) {
       return dispatch(path, method, headers, body, pool, retry + 1, triedAddrs);
@@ -2010,10 +1922,6 @@ async function fetchModelsFromUpstream(): Promise<any[]> {
       latency: c.latency,
       lockedBy: c.lockedBy,
       active: !!c.lockedBy,
-      // 429 熔断 + 冷却状态（移植自 OpenCodeProxyHub）
-      disabled429: c.disabled429 || false,
-      cooldownUntil: c.cooldownUntil || null,
-      consecutiveRateLimitCount: c.consecutiveRateLimitCount || 0,
     }));
     const releasedList = releasedCandidates.map(r => ({
       address: r.address,
@@ -2023,14 +1931,8 @@ async function fetchModelsFromUpstream(): Promise<any[]> {
       consecutiveSuccesses: r.consecutiveSuccesses,
       lastFailedAt: r.lastFailedAt,
       lastSucceededAt: r.lastSucceededAt,
-      disabled429: r.disabled429 || false,
-      cooldownUntil: r.cooldownUntil || null,
     }));
-    const circuitStats = {
-      disabled429Count: candidates.filter(c => c.disabled429).length,
-      coolingCount: candidates.filter(c => c.cooldownUntil && Date.now() < c.cooldownUntil!).length,
-    };
-    sendJson(nodeRes, 200, { proxies: list, count: list.length, released: releasedList, releasedCount: releasedList.length, circuit: circuitStats });
+    sendJson(nodeRes, 200, { proxies: list, count: list.length, released: releasedList, releasedCount: releasedList.length });
     return;
   }
 

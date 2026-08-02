@@ -455,6 +455,7 @@ async function importProxies() {
 
 /* ===== SOURCES ===== */
 async function fetchSources() {
+  startRefresh('sources', fetchSources, 15000);
   try {
     const s = await api('/api/sources');
     const list = s.sources || [];
