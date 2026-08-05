@@ -6,3 +6,15 @@ data/
 wgcf-profile.conf
 .DS_Store
 *.log
+
+# 备份与调试产物（追加补充）
+*.bak2
+*.bak3
+*.bak4
+*.bak.*
+*.tar
+*_rr_fix.ts
+*fallback*
+auth_matrix.js
+probe_upstream.js
+public\*

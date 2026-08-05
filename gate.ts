@@ -103,7 +103,7 @@ const DEFAULT_SOURCES = [
 ];
 
 // 通用文本 parser：支持 http://user:pass@ip:port、socks5://ip:port、ip:port 等格式
-function genericTextParser(data: string): ProxyItem[] {
+function genericTextParser(data: string, proto?: string): ProxyItem[] {
   return data.split('\n')
     .map(line => line.trim())
     .filter(line => line && !line.startsWith('#'))
@@ -120,7 +120,7 @@ function genericTextParser(data: string): ProxyItem[] {
       if (m1) return { address: `${m1[2]}:${m1[3]}`, protocol: m1[1].replace('https', 'http'), latency: 999, quality_grade: 'C' };
       // ip:port 纯文本
       const m2 = line.match(/^(\d+\.\d+\.\d+\.\d+):(\d+)$/);
-      if (m2) return { address: line, protocol: 'socks5', latency: 999, quality_grade: 'C' };
+      if (m2) return { address: line, protocol: proto || 'socks5', latency: 999, quality_grade: 'C' };
       return null;
     })
     .filter((x): x is ProxyItem => x !== null);
@@ -139,7 +139,7 @@ function loadSources() {
         name: s.name,
         url: s.url,
         type: srcType,
-        parser: def ? def.parser : (srcType === 'json' ? DEFAULT_SOURCES[0].parser : genericTextParser),
+        parser: def ? def.parser : (srcType === 'json' ? DEFAULT_SOURCES[0].parser : (data: string) => genericTextParser(data, s.protocol)),
       };
     });
     console.log(`[源] 已加载 ${proxySources.length} 个代理源`);
@@ -295,6 +295,7 @@ const STREAM_TIMEOUT = 300000;
 
 const MAX_ACTIVE_KEYS = 20;
 const SLOTS_PER_KEY = 3;
+const PROBE_BATCH_SIZE = parseInt(process.env.PROBE_BATCH_SIZE || '80');
 const POOL_CLEANUP_MS = 60000;
 const KEY_IDLE_RELEASE_MS = 600000;
 
@@ -332,15 +333,136 @@ let releasedCandidates: ReleasedCandidateItem[] = [];
 let customSlots: Slot[] = [];
 let fallbackSlot: Slot | null = null;
 let keySlotPools: Map<string, KeySlotPool> = new Map();
-
-const PROXY_MAX_FAILS = 3;
-let proxyFailCount = new Map<string, number>();
 let refreshing = false;
+let slotFailureTracker = new Map<string, { consecutiveFailures: number }>();
+// Known-good proxies: recently verified working (for allocation priority)
+const knownGoodProxies = new Map<string, { lastOk: number, successCount: number }>();
+// WARP 429 backoff: skip WARP when recently rate-limited
+let warp429SkipUntil = 0;
+
+// Track per-slot failure count to avoid releasing on transient glitches
+function trackSlotResult(addr: string, success: boolean) {
+  let entry = slotFailureTracker.get(addr);
+  if (!entry) { entry = { consecutiveFailures: 0 }; slotFailureTracker.set(addr, entry); }
+  if (success) {
+    entry.consecutiveFailures = 0;
+    // Track known-good for allocation priority
+    const existing = knownGoodProxies.get(addr);
+    if (existing) {
+      existing.lastOk = Date.now();
+      existing.successCount++;
+    } else {
+      knownGoodProxies.set(addr, { lastOk: Date.now(), successCount: 1 });
+    }
+    // GC: keep under 500 entries
+    if (knownGoodProxies.size > 500) {
+      const oldest = knownGoodProxies.keys().next().value;
+      if (oldest) knownGoodProxies.delete(oldest);
+    }
+  } else {
+    entry.consecutiveFailures++;
+  }
+  // GC: keep under 1000 entries
+  if (slotFailureTracker.size > 1000) { const oldest = slotFailureTracker.keys().next().value; if (oldest) slotFailureTracker.delete(oldest); }
+}
+
+// Record a rate-limited (429) response: proxy reachable but upstream throttled.
+// Mark proxy known-good (so we retry it) and apply WARP 429 backoff if it's WARP.
+function handleRateLimit(slotAddr: string, isWarpSlot: boolean) {
+  if (isWarpSlot && warpSlot && slotAddr === warpSlot.addr) {
+    // WARP 出口被上游限流 → 退避，避免连续被限更狠
+    const backoffMs = 30000 + Math.floor(Math.random() * 20000); // 30-50s
+    warp429SkipUntil = Date.now() + backoffMs;
+    console.log(`[限流] WARP 429 → ${backoffMs/1000}s 后跳过 WARP`);
+  } else {
+    // 普通代理 429：说明代理可达，仅上游限流 → 记为 known-good 下次优先尝试
+    const existing = knownGoodProxies.get(slotAddr);
+    if (existing) { existing.lastOk = Date.now(); existing.successCount++; }
+    else { knownGoodProxies.set(slotAddr, { lastOk: Date.now(), successCount: 1 }); }
+  }
+}
 
 const START_TIME = Date.now();
 const stats = { total: 0, success: 0, rateLimited: 0, errors: 0 };
 const recentLogs: string[] = [];
 const MAX_LOGS = 500;
+
+// ═══════════════════════════════════════════════════════════
+//  Agent 连接池（LRU 缓存，避免重复 TCP 握手）
+// ═══════════════════════════════════════════════════════════
+
+const agentCache = new Map<string, https.Agent | http.Agent>();
+const AGENT_CACHE_MAX = 50;
+function getCachedAgent(url: string, proto: 'http' | 'socks5'): https.Agent | http.Agent | undefined {
+  if (!url) return undefined;
+  const key = `${proto}::${url}`;
+  let agent = agentCache.get(key);
+  if (agent) {
+    // LRU: 删除再重插实现"最近使用"
+    agentCache.delete(key);
+    agentCache.set(key, agent);
+    return agent;
+  }
+  if (agentCache.size >= AGENT_CACHE_MAX) {
+    const oldest = agentCache.keys().next().value;
+    if (oldest) { const old = agentCache.get(oldest); agentCache.delete(oldest); try { (old as any)?.destroy?.(); } catch {} }
+  }
+  try {
+    if (proto === 'socks5') {
+      agent = new SocksProxyAgent(url, { timeout: TIMEOUT }) as unknown as https.Agent;
+    } else {
+      agent = new HttpsProxyAgent({ proxy: url, timeout: TIMEOUT, rejectUnauthorized: false }) as unknown as https.Agent;
+    }
+    agentCache.set(key, agent);
+    return agent;
+  } catch { return undefined; }
+}
+function clearAgentCache() {
+  for (const [k, a] of agentCache) { try { (a as any)?.destroy?.(); } catch {} }
+  agentCache.clear();
+}
+
+// ═══════════════════════════════════════════════════════════
+//  审计异步写入（流式写入，避免同步 I/O 阻塞事件循环）
+// ═══════════════════════════════════════════════════════════
+
+let auditStream: fs.WriteStream | null = null;
+let auditBuffer: string[] = [];
+const AUDIT_FLUSH_INTERVAL = 5000; // 5s flush 一次
+const AUDIT_BATCH_SIZE = 50;       // 或攒 50 条就 flush
+
+function initAuditStream() {
+  try {
+    auditStream = fs.createWriteStream(AUDIT_FILE, { flags: 'a', encoding: 'utf-8' });
+    auditStream.on('error', () => {});
+  } catch {}
+}
+function flushAudit() {
+  if (auditBuffer.length === 0) return;
+  const batch = auditBuffer.splice(0);
+  if (auditStream && auditStream.writable) {
+    auditStream.write(batch.join('') + '\n');
+  } else {
+    // fallback: 同步写入
+    try { fs.appendFileSync(AUDIT_FILE, batch.join('') + '\n', 'utf-8'); } catch {}
+  }
+}
+setInterval(flushAudit, AUDIT_FLUSH_INTERVAL);
+
+// ═══════════════════════════════════════════════════════════
+//  模型缓存持久化
+// ═══════════════════════════════════════════════════════════
+
+const MODELS_CACHE_FILE = path.join(DATA_DIR, 'models_cache.json');
+function saveModelsCache(models: any[]) {
+  try { fs.writeFileSync(MODELS_CACHE_FILE, JSON.stringify({ models, ts: Date.now() }), 'utf-8'); } catch {}
+}
+function loadModelsCache(): { models: any[]; ts: number } | null {
+  try {
+    if (!fs.existsSync(MODELS_CACHE_FILE)) return null;
+    return JSON.parse(fs.readFileSync(MODELS_CACHE_FILE, 'utf-8'));
+  } catch { return null; }
+}
 
 // ═══════════════════════════════════════════════════════════
 //  审计 & API Key 管理
@@ -523,6 +645,7 @@ async function initCustomSlots(): Promise<void> {
 async function initFallbackProxy(): Promise<void> {
   if (!FALLBACK_PROXY_RUNTIME) { fallbackSlot = null; return; }
   const lines = FALLBACK_PROXY_RUNTIME.split(',').map(s => s.trim()).filter(Boolean);
+  let anyReady = false;
   for (const line of lines) {
     try {
       let isSocks = line.startsWith('socks5://') || line.startsWith('socks5h://');
@@ -531,10 +654,12 @@ async function initFallbackProxy(): Promise<void> {
       // 去掉认证信息 user:pass@ 得到纯 ip:port
       const cleanAddr = fullAddr.replace(/^[^@]+@/, '');
       const proxyItem: ProxyItem = { address: cleanAddr, fullAddr: fullAddr, protocol: isSocks ? 'socks5' : 'http', latency: 999, quality_grade: 'F' };
-      const r = await probe(proxyItem);
+      // Fallback 用更长探活超时（15s），goproxy 延迟 4-6s 常见，8s 太紧
+      const r = await probeWithTimeout(proxyItem, 15000);
       if (r.ok) {
         const url = isSocks ? `socks5h://${fullAddr}` : `http://${fullAddr}`;
         fallbackSlot = { addr: cleanAddr, url, proto: isSocks ? 'socks5' : 'http', latencyMs: r.latencyMs, qualityGrade: 'F' };
+        anyReady = true;
         console.log(`[Fallback+] ${cleanAddr} (${r.latencyMs}ms) 就绪`);
       } else {
         console.warn(`[Fallback] ${cleanAddr} 探活失败，将跳过`);
@@ -542,6 +667,9 @@ async function initFallbackProxy(): Promise<void> {
     } catch (e: any) {
       console.warn(`[Fallback] ${line} 异常: ${e.message}`);
     }
+  }
+  if (!anyReady) {
+    console.warn('[Fallback] 未就绪，将由定时任务持续重试');
   }
 }
 
@@ -556,7 +684,8 @@ async function fetchSource(source: typeof DEFAULT_SOURCES[0]): Promise<ProxyItem
     if (warpModeRuntime === 'on' && warpSlot) {
       const agent = new SocksProxyAgent(warpSlot.url, { timeout: 10000 }) as unknown as https.Agent;
       const body = await new Promise<string>((resolve, reject) => {
-        const req = https.request(source.url, {
+        const httpMod = source.url.startsWith('https://') ? https : http;
+        const req = httpMod.request(source.url, {
           method: 'GET',
           headers: { 'user-agent': 'Mozilla/5.0' },
           agent,
@@ -668,15 +797,8 @@ async function fastTcpProbe(address: string, protocol: string): Promise<{ ok: bo
 //  探活
 // ═══════════════════════════════════════════════════════════
 
-function makeAgent(url: string, proto: 'http' | 'socks5'): https.Agent {
-  if (proto === 'socks5') {
-    return new SocksProxyAgent(url, { timeout: PROXY_PROBE_TIMEOUT }) as unknown as https.Agent;
-  }
-  return new HttpsProxyAgent({
-    proxy: url,
-    keepAlive: false,
-    timeout: PROXY_PROBE_TIMEOUT,
-  }) as unknown as https.Agent;
+function makeAgent(url: string, proto: 'http' | 'socks5'): https.Agent | undefined {
+  return getCachedAgent(url, proto) as https.Agent | undefined;
 }
 
 async function probe(item: ProxyItem): Promise<{ ok: boolean; latencyMs: number }> {
@@ -704,7 +826,37 @@ async function probe(item: ProxyItem): Promise<{ ok: boolean; latencyMs: number 
   } catch {
     return { ok: false, latencyMs: Date.now() - start };
   } finally {
-    try { agent.destroy(); } catch {}
+    // preserved
+  }
+}
+
+// Fallback 专用探活：超时可调（默认 PROXY_PROBE_TIMEOUT）
+async function probeWithTimeout(item: ProxyItem, timeoutMs?: number): Promise<{ ok: boolean; latencyMs: number }> {
+  const addr = item.fullAddr || item.address;
+  const url = item.protocol === 'socks5' ? `socks5h://${addr}` : `http://${addr}`;
+  const agent = makeAgent(url, item.protocol as 'http' | 'socks5');
+  const start = Date.now();
+  try {
+    const result = await new Promise<{ ok: boolean }>((resolve) => {
+      const req = https.request(`${UPSTREAM}/v1/models`, {
+        method: 'GET',
+        headers: { accept: 'application/json', authorization: 'Bearer ' },
+        agent,
+        rejectUnauthorized: false,
+        timeout: timeoutMs || PROXY_PROBE_TIMEOUT,
+      }, (res) => {
+        res.on('data', () => {});
+        res.on('end', () => resolve({ ok: res.statusCode! >= 200 && res.statusCode! < 400 }));
+      });
+      req.on('error', () => resolve({ ok: false }));
+      req.on('timeout', () => { req.destroy(); resolve({ ok: false }); });
+      req.end();
+    });
+    return { ok: result.ok, latencyMs: Date.now() - start };
+  } catch {
+    return { ok: false, latencyMs: Date.now() - start };
+  } finally {
+    // preserved
   }
 }
 
@@ -742,20 +894,10 @@ async function probeWarp(): Promise<boolean> {
     }
     warpStatus = 'stopped';
     warpSlot = null;
-    // 清理所有 pool 中的 WARP slot
-    for (const [, pool] of keySlotPools) {
-      const removeIdx = pool.slots.findIndex(s => s.addr === getWarpAddr());
-      if (removeIdx >= 0) pool.slots.splice(removeIdx, 1);
-    }
     return false;
   } catch {
     warpStatus = 'stopped';
     warpSlot = null;
-    // 清理所有 pool 中的 WARP slot
-    for (const [, pool] of keySlotPools) {
-      const removeIdx = pool.slots.findIndex(s => s.addr === getWarpAddr());
-      if (removeIdx >= 0) pool.slots.splice(removeIdx, 1);
-    }
     return false;
   }
 }
@@ -806,10 +948,14 @@ async function allocateKeySlots(keyId: string): Promise<KeySlotPool | null> {
     const ga = gradeOrder[a.quality_grade] ?? 99;
     const gb = gradeOrder[b.quality_grade] ?? 99;
     if (ga !== gb) return ga - gb;
+    // Known-good boost: recently verified proxies first
+    const ka = knownGoodProxies.get(a.address)?.lastOk || 0;
+    const kb = knownGoodProxies.get(b.address)?.lastOk || 0;
+    if (ka !== kb) return kb - ka;
     return (a.latency || 999) - (b.latency || 999);
   });
 
-  const batch = available.slice(0, SLOTS_PER_KEY + 2);
+  const batch = available.slice(0, PROBE_BATCH_SIZE);
   if (batch.length === 0) {
     if (warpSlot) {
       const newPool: KeySlotPool = { keyId, slots: [warpSlot], rrCursor: 0, lastUsedAt: Date.now() };
@@ -872,6 +1018,14 @@ function releaseKeySlots(keyId: string): void {
 }
 
 function replaceFailedSlot(pool: KeySlotPool, failedAddr: string): void {
+  // Track failure -- only release after 2+ consecutive failures
+  trackSlotResult(failedAddr, false);
+  const entry = slotFailureTracker.get(failedAddr);
+  if (entry && entry.consecutiveFailures < 2) {
+    console.log(`[替换] ${failedAddr} 首次失败，保留slot观察 (连续失败 ${entry.consecutiveFailures})`);
+    return;
+  }
+  slotFailureTracker.delete(failedAddr);
   const idx = pool.slots.findIndex(s => s.addr === failedAddr);
   if (idx >= 0) pool.slots.splice(idx, 1);
   const failedCand = candidates.find(c => c.address === failedAddr);
@@ -931,24 +1085,7 @@ function replaceFailedSlot(pool: KeySlotPool, failedAddr: string): void {
 
 async function getKeySlotPool(keyId: string): Promise<KeySlotPool | null> {
   const existing = keySlotPools.get(keyId);
-  if (existing) {
-    existing.lastUsedAt = Date.now();
-    // 如果所有 slot 都是 fallback 且候选池有可用候选，强制重新分配
-    if (existing.slots.length > 0) {
-      const warpAddr = getWarpAddr();
-      const allFallback = existing.slots.every(s => s.addr === warpAddr || customSlots.some(cs => cs.addr === s.addr));
-      const hasAvailableCandidates = candidates.some(c => !c.lockedBy);
-      if (allFallback && hasAvailableCandidates) {
-        console.log(`[分配] Key ${keyId.slice(0,7)}... 全为 fallback slot，候选池可用，重新分配`);
-        keySlotPools.delete(keyId);
-      } else {
-        return existing;
-      }
-    } else {
-      console.log(`[分配] Key ${keyId.slice(0,7)}... 槽位为空，重新分配`);
-      keySlotPools.delete(keyId);
-    }
-  }
+  if (existing) { existing.lastUsedAt = Date.now(); return existing; }
   const pool = await allocateKeySlots(keyId);
   if (!pool) return null;
   keySlotPools.set(keyId, pool);
@@ -963,18 +1100,9 @@ async function refreshCandidates(): Promise<void> {
   if (refreshing) return;
   refreshing = true;
   try {
-    const oldCandidatesLen = candidates.length;
     await loadCandidates();
     // 释放的候选重新加入活跃池
     await rePromoteReleasedCandidates();
-    // 候选池从空恢复 → 清理所有纯 fallback pool
-    if (oldCandidatesLen === 0 && candidates.length > 0) {
-      console.log(`[刷新] 候选池恢复 (${candidates.length} 个)，清理 fallback pool 强制重新分配`);
-      for (const [keyId, pool] of keySlotPools) {
-        const allFallback = pool.slots.every(s => s.addr === getWarpAddr());
-        if (allFallback) keySlotPools.delete(keyId);
-      }
-    }
     if (warpModeRuntime === 'on') {
       const warpOk = await probeWarp();
       if (!warpOk && warpStatus === 'running') {
@@ -1072,8 +1200,8 @@ function doHttpsStream(
       for (const [k, v] of Object.entries(res.headers)) {
         if (v) resHeaders[k] = Array.isArray(v) ? v[0] : v;
       }
-      res.on('end', () => { try { if (agent) agent.destroy(); } catch {} });
-      res.on('error', () => { try { if (agent) agent.destroy(); } catch {} });
+      res.on('end', () => {});
+      res.on('error', () => {});
       const stream = new ReadableStream<Uint8Array>({
         start(controller) {
           res.on('data', (chunk: Buffer) => controller.enqueue(new Uint8Array(chunk)));
@@ -1108,6 +1236,7 @@ function audit(status: number, latencyMs: number, slotAddr: string, path: string
         promptTokens = parsed.usage.prompt_tokens || 0;
         completionTokens = parsed.usage.completion_tokens || 0;
         totalTokens = parsed.usage.total_tokens || 0;
+        cacheRead = parsed.usage.prompt_cache_hit_tokens || 0;
       }
     }
   } catch {}
@@ -1116,13 +1245,12 @@ function audit(status: number, latencyMs: number, slotAddr: string, path: string
     cacheCreation, cacheRead, latencyMs, status, slotAddr,
   });
   if (auditLog.length > MAX_AUDIT) auditLog.shift();
-  // 追加到持久化文件
-  try {
-    fs.appendFileSync(AUDIT_FILE, JSON.stringify({
-      ts: Date.now(), keyId: keyId || 'unknown', model, promptTokens, completionTokens, totalTokens,
-      cacheCreation, cacheRead, latencyMs, status, slotAddr,
-    }) + '\n', 'utf-8');
-  } catch {}
+  // 追加到持久化文件（异步流式写入）
+  auditBuffer.push(JSON.stringify({
+    ts: Date.now(), keyId: keyId || 'unknown', model, promptTokens, completionTokens, totalTokens,
+    cacheCreation, cacheRead, latencyMs, status, slotAddr,
+  }));
+  if (auditBuffer.length >= AUDIT_BATCH_SIZE) flushAudit();
 }
 
 function loadAuditLog() {
@@ -1182,8 +1310,6 @@ async function dispatch(
   for (let i = 0; i < pool.slots.length; i++) {
     const idx = (pool.rrCursor + i) % pool.slots.length;
     const s = pool.slots[idx];
-    // WARP 已关闭时跳过 WARP slot
-    if (warpModeRuntime !== 'on' && s.addr === getWarpAddr()) continue;
     if (!triedAddrs.has(s.addr)) {
       selectedSlot = s;
       pool.rrCursor = (idx + 1) % pool.slots.length;
@@ -1193,7 +1319,7 @@ async function dispatch(
 
   // 没有可用 slot → fallback 链
   if (!selectedSlot) {
-    if (warpModeRuntime === 'on' && warpSlot && !triedAddrs.has(warpSlot.addr)) {
+    if (warpSlot && !triedAddrs.has(warpSlot.addr) && Date.now() >= warp429SkipUntil) {
       console.log(`[调度] pool slot 耗尽, fallback → WARP`);
       selectedSlot = warpSlot;
     } else if (customSlots.length > 0) {
@@ -1265,9 +1391,9 @@ async function dispatch(
       const latencyMs = Date.now() - start;
       if (result.status >= 200 && result.status < 400) {
         stats.total++;
+        trackSlotResult(selectedSlot.addr, true);
         stats.success++;
         console.log(`[调度] ${selectedSlot.addr} stream OK ${result.status} (${latencyMs}ms) pool=${pool.keyId.slice(0,7)}...`);
-        proxyFailCount.delete(selectedSlot.addr);
         return { status: result.status, stream: result.stream, streamHeaders: result.headers };
       }
       // 读取错误响应体
@@ -1279,16 +1405,11 @@ async function dispatch(
         errBody += new TextDecoder().decode(value);
       }
       stats.total++;
-      if (result.status === 429) stats.rateLimited++;
-      else stats.errors++;
+      if (result.status === 429) {
+        stats.rateLimited++;
+        handleRateLimit(selectedSlot.addr, selectedSlot === warpSlot);
+      } else stats.errors++;
       console.error(`[调度] ${selectedSlot.addr} stream ${result.status} (${latencyMs}ms) retry=${retry}`);
-      const fails = (proxyFailCount.get(selectedSlot.addr) || 0) + 1;
-      proxyFailCount.set(selectedSlot.addr, fails);
-      if (fails >= PROXY_MAX_FAILS) {
-        console.log(`[调度] ${selectedSlot.addr} 连续 ${fails} 次失败，标记不可用`);
-        const bc = candidates.find(c => c.address === selectedSlot.addr);
-        if (bc) bc.lockedBy = '__blacklist__';
-      }
       if (result.status === 429 || result.status >= 500) {
         replaceFailedSlot(pool, selectedSlot.addr);
       }
@@ -1302,25 +1423,20 @@ async function dispatch(
       const latencyMs = Date.now() - start;
       if (result.status >= 200 && result.status < 400) {
         stats.total++;
+        trackSlotResult(selectedSlot.addr, true);
         stats.success++;
         const usage = extractUsageFromResponse(result.body);
         if (usage.tokens > 0) recordKeyUsage(pool.keyId, usage.tokens);
         console.log(`[调度] ${selectedSlot.addr} OK ${result.status} (${latencyMs}ms) pool=${pool.keyId.slice(0,7)}...`);
-        proxyFailCount.delete(selectedSlot.addr);
         audit(result.status, latencyMs, selectedSlot.addr, path, result.body, pool.keyId);
         return { status: result.status, body: result.body };
       }
       stats.total++;
-      if (result.status === 429) stats.rateLimited++;
-      else stats.errors++;
+      if (result.status === 429) {
+        stats.rateLimited++;
+        handleRateLimit(selectedSlot.addr, selectedSlot === warpSlot);
+      } else stats.errors++;
       console.error(`[调度] ${selectedSlot.addr} ${result.status} (${latencyMs}ms) retry=${retry}`);
-      const fails = (proxyFailCount.get(selectedSlot.addr) || 0) + 1;
-      proxyFailCount.set(selectedSlot.addr, fails);
-      if (fails >= PROXY_MAX_FAILS) {
-        console.log(`[调度] ${selectedSlot.addr} 连续 ${fails} 次失败，标记不可用`);
-        const bc = candidates.find(c => c.address === selectedSlot.addr);
-        if (bc) bc.lockedBy = '__blacklist__';
-      }
       if (result.status === 429 || result.status >= 500) {
         replaceFailedSlot(pool, selectedSlot.addr);
       }
@@ -1334,13 +1450,6 @@ async function dispatch(
     stats.total++;
     stats.errors++;
     console.error(`[调度] ${selectedSlot.addr} 异常: ${e.message} retry=${retry}`);
-    const fails = (proxyFailCount.get(selectedSlot.addr) || 0) + 1;
-    proxyFailCount.set(selectedSlot.addr, fails);
-    if (fails >= PROXY_MAX_FAILS) {
-      console.log(`[调度] ${selectedSlot.addr} 连续 ${fails} 次失败，标记不可用`);
-      const bc = candidates.find(c => c.address === selectedSlot.addr);
-      if (bc) bc.lockedBy = '__blacklist__';
-    }
     replaceFailedSlot(pool, selectedSlot.addr);
     audit(502, Date.now() - start, selectedSlot.addr, path, JSON.stringify({ error: e.message }), pool.keyId);
     if (retry < MAX_RETRIES) {
@@ -1348,7 +1457,7 @@ async function dispatch(
     }
     return { status: 502, body: JSON.stringify({ error: 'proxy_error', message: e.message }) };
   } finally {
-    try { agent.destroy(); } catch {}
+    // preserved: agent stays in LRU cache for reuse
   }
 }
 
@@ -1593,6 +1702,7 @@ async function fetchModelsFromUpstream(): Promise<any[]> {
   }));
   cachedModels = freeModels;
   cachedModelsTime = Date.now();
+  saveModelsCache(freeModels);
   return freeModels;
 }
 
@@ -1912,7 +2022,7 @@ async function fetchModelsFromUpstream(): Promise<any[]> {
       proxySources.push({
         name, url: body.url,
         type: srcType as any,
-        parser: def ? def.parser : (srcType === 'json' ? DEFAULT_SOURCES[0].parser : genericTextParser),
+        parser: def ? def.parser : (srcType === 'json' ? DEFAULT_SOURCES[0].parser : (data: string) => genericTextParser(data, s.protocol)),
       });
       saveSources();
       sendJson(nodeRes, 200, { message: '已添加', name, url: body.url });
@@ -1966,16 +2076,11 @@ async function fetchModelsFromUpstream(): Promise<any[]> {
         } else {
           warpStatus = 'stopped';
           warpSlot = null;
-          // 清理所有 pool 中的 WARP slot
-          for (const [, pool] of keySlotPools) {
-            const removeIdx = pool.slots.findIndex(s => s.addr === getWarpAddr());
-            if (removeIdx >= 0) pool.slots.splice(removeIdx, 1);
-          }
         }
         console.log(`[配置] WARP 模式: ${oldMode} → ${body.warpMode}`);
       }
-      if (body.fallbackProxy !== undefined) {
-        FALLBACK_PROXY_RUNTIME = body.fallbackProxy || '';
+      if (body.fallbackProxy !== undefined && String(body.fallbackProxy).trim() !== '') {
+        FALLBACK_PROXY_RUNTIME = String(body.fallbackProxy).trim();
         console.log(`[配置] Fallback 代理已更新`);
         // 重新初始化 fallback
         fallbackSlot = null;
@@ -2165,6 +2270,14 @@ setInterval(() => {
   probeReleasedCandidates().catch(e => console.error('[备用池] 测活错误:', e.message));
 }, RELEASED_CANDIDATE_PROBE_INTERVAL);
 
+// Fallback 自愈：每 30s 检查，未就绪自动重试（防 goproxy 临时抖动/配置误清）
+setInterval(() => {
+  if (FALLBACK_PROXY_RUNTIME && !fallbackSlot) {
+    console.log('[Fallback] 检测到 fallback 未就绪，尝试重连...');
+    initFallbackProxy().catch(e => console.error('[Fallback] 重连异常:', e.message));
+  }
+}, 30000);
+
 // 定期清理过期/空闲的 Key Slot Pool
 setInterval(() => {
   const now = Date.now();
@@ -2206,6 +2319,15 @@ async function main() {
 
   // 加载历史审计日志（最近 500 条）
   loadAuditLog();
+  initAuditStream();
+
+  // 加载缓存的模型列表（启动时直接用，避免首次请求等待上游）
+  const cached = loadModelsCache();
+  if (cached && cached.models.length > 0 && Date.now() - cached.ts < 3600000) {
+    cachedModels = cached.models;
+    cachedModelsTime = cached.ts;
+    console.log(`[启动] 加载模型缓存: ${cached.models.length} 个（${Math.round((Date.now()-cached.ts)/60000)} 分钟前）`);
+  }
 
   // 加载候选代理
   console.log('[启动] 加载候选代理...');
@@ -2234,6 +2356,16 @@ async function main() {
     console.log(`[启动] 最大活跃 Key: ${MAX_ACTIVE_KEYS}`);
     console.log(`[启动] 每 Key slot 数: ${SLOTS_PER_KEY}`);
     console.log('═══════════════════════════════════════════════════');
+
+    // WARP 自动恢复：每 30s 检查一次，挂了自动重连
+    if (warpModeRuntime === 'on') {
+      setInterval(async () => {
+        if (warpStatus !== 'running') {
+          console.log('[WARP] 检测到 WARP 异常，尝试重连...');
+          await probeWarp();
+        }
+      }, 30000);
+    }
   });
 }
 
@@ -2241,3 +2373,8 @@ main().catch(e => {
   console.error('[启动] 致命错误:', e);
   process.exit(1);
 });
+
+// 退出时 flush 审计日志
+process.on('exit', () => { flushAudit(); });
+process.on('SIGINT', () => { flushAudit(); process.exit(0); });
+process.on('SIGTERM', () => { flushAudit(); process.exit(0); });

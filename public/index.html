@@ -1,96 +1,427 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html class="light" lang="zh-CN">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>opencode-free-gate</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%23d4a853'/><text x='16' y='22' text-anchor='middle' fill='%2312101a' font-size='16' font-weight='bold'>G</text></svg>">
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>opencode-free-gate · 管理面板</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<script>
+tailwind.config = {
+  darkMode: "class",
+  theme: {
+    extend: {
+      colors: {
+        primary: "#2979ff",
+        "primary-hover": "#1565c0",
+        "primary-container": "#0f6df3",
+        "on-primary": "#ffffff",
+        "on-primary-container": "#fefcff",
+        "primary-fixed": "#d9e2ff",
+        "on-primary-fixed": "#001945",
+        "primary-fixed-dim": "#b0c6ff",
+        "on-primary-fixed-variant": "#00429b",
+        secondary: "#505f76",
+        "on-secondary": "#ffffff",
+        "secondary-fixed": "#d3e4fe",
+        "secondary-fixed-dim": "#b7c8e1",
+        "on-secondary-fixed": "#0b1c30",
+        "on-secondary-fixed-variant": "#38485d",
+        "secondary-container": "#d0e1fb",
+        "on-secondary-container": "#54647a",
+        surface: "#ffffff",
+        "surface-dim": "#d8dadc",
+        "surface-bright": "#f7f9fb",
+        "surface-container": "#eceef0",
+        "surface-container-low": "#f2f4f6",
+        "surface-container-lowest": "#ffffff",
+        "surface-container-high": "#e6e8ea",
+        "surface-container-highest": "#e0e3e5",
+        "on-surface": "#191c1e",
+        "on-surface-variant": "#424655",
+        background: "#f7f9fb",
+        "on-background": "#191c1e",
+        outline: "#727786",
+        "outline-variant": "#c2c6d7",
+        border: "#e2e8f0",
+        error: "#ef4444",
+        "on-error": "#ffffff",
+        "error-container": "#ffdad6",
+        "on-error-container": "#93000a",
+        info: "#3b82f6",
+        success: "#10b981",
+        warning: "#f59e0b",
+        "inverse-surface": "#2d3133",
+        "inverse-on-surface": "#eff1f3",
+        "inverse-primary": "#b0c6ff",
+      },
+      borderRadius: {
+        DEFAULT: "0.25rem",
+        lg: "0.5rem",
+        xl: "0.75rem",
+        "2xl": "1rem",
+        full: "9999px"
+      },
+      fontFamily: {
+        sans: ["Inter", "system-ui", "sans-serif"],
+        mono: ["JetBrains Mono", "Fira Code", "monospace"],
+      },
+      fontSize: {
+        "display-lg": ["32px", { lineHeight: "40px", letterSpacing: "-0.02em", fontWeight: "700" }],
+        "headline-md": ["24px", { lineHeight: "32px", letterSpacing: "-0.01em", fontWeight: "600" }],
+        "headline-sm": ["18px", { lineHeight: "28px", fontWeight: "600" }],
+        "body-lg": ["16px", { lineHeight: "24px", fontWeight: "400" }],
+        "body-md": ["14px", { lineHeight: "20px", fontWeight: "400" }],
+        "label-md": ["12px", { lineHeight: "16px", letterSpacing: "0.05em", fontWeight: "600" }],
+        "mono-md": ["13px", { lineHeight: "18px", fontWeight: "400" }],
+      },
+      spacing: {
+        gutter: "1.5rem",
+        "stack-sm": "0.5rem",
+        "stack-md": "1rem",
+        "stack-lg": "2rem",
+        "margin-desktop": "2rem",
+        "margin-mobile": "1rem",
+        "container-max": "1440px",
+      }
+    },
+  },
+}
+</script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono&display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,0..1&display=swap" rel="stylesheet"/>
 <link rel="stylesheet" href="/public/style.css">
 </head>
-<body>
-<div class="sidebar" id="sidebar">
-<div class="logo"><span>opencode-free-gate</span></div>
-<nav id="nav">
-<a class="active" data-tab="dashboard"><span class="icon">📊</span><span>仪表盘</span></a>
-<a data-tab="audit"><span class="icon">📈</span><span>用量审计</span></a>
-<a data-tab="keys"><span class="icon">🔑</span><span>密钥管理</span></a>
-<a data-tab="proxies"><span class="icon">🔄</span><span>代理池</span></a>
-<a data-tab="sources"><span class="icon">📡</span><span>代理源</span></a>
-<a data-tab="config"><span class="icon">⚙️</span><span>配置</span></a>
-<a data-tab="logs"><span class="icon">📋</span><span>日志</span></a>
-</nav>
+<body class="text-on-surface font-sans text-body-md bg-background antialiased selection:bg-primary-fixed selection:text-on-primary-fixed">
+
+<!-- Toast -->
+<div id="toast" class="fixed bottom-7 left-1/2 -translate-x-1/2 z-[1000] flex items-center gap-2 px-6 py-3 rounded-2xl shadow-2xl bg-[#111827] text-white text-sm font-medium opacity-0 pointer-events-none transition-all duration-300"></div>
+
+<!-- Sidebar Overlay (mobile) -->
+<div id="sidebarOverlay" class="fixed inset-0 bg-black/30 backdrop-blur-sm z-40 hidden" onclick="closeSidebar()"></div>
+
+<!-- ===== SIDEBAR ===== -->
+<aside id="sidebar" class="fixed h-full w-[260px] left-0 top-0 bg-surface border-r border-outline-variant shadow-lg z-50 flex flex-col hidden md:flex transition-transform duration-200 rounded-r-2xl">
+  <div class="px-6 pt-5 pb-4 flex items-center gap-3 shrink-0">
+    <div class="w-9 h-9 rounded-2xl bg-primary flex items-center justify-center text-on-primary shadow-sm">
+      <span class="material-symbols-outlined text-xl" style="font-variation-settings:'FILL'1">bolt</span>
+    </div>
+    <div>
+      <h1 class="text-headline-sm text-headline-sm font-bold text-on-surface leading-tight">opencode-gate</h1>
+      <p class="text-label-md text-label-md text-secondary mt-0.5">基础架构管理</p>
+    </div>
+  </div>
+  <nav id="nav" class="flex-1 px-3 space-y-0.5 overflow-y-auto min-h-0">
+    <a data-tab="dashboard" class="flex items-center gap-3 px-4 py-2.5 text-secondary hover:text-on-surface hover:bg-surface-container-high transition-all duration-200 rounded-2xl cursor-pointer group active:scale-[0.98]">
+      <span class="material-symbols-outlined text-[20px] text-secondary group-hover:text-on-surface">dashboard</span>
+      <span class="text-body-md">仪表盘</span>
+    </a>
+    <a data-tab="audit" class="flex items-center gap-3 px-4 py-2.5 text-secondary hover:text-on-surface hover:bg-surface-container-high transition-all duration-200 rounded-2xl cursor-pointer group active:scale-[0.98]">
+      <span class="material-symbols-outlined text-[20px] text-secondary group-hover:text-on-surface">rule</span>
+      <span class="text-body-md">用量审计</span>
+    </a>
+    <a data-tab="keys" class="flex items-center gap-3 px-4 py-2.5 text-secondary hover:text-on-surface hover:bg-surface-container-high transition-all duration-200 rounded-2xl cursor-pointer group active:scale-[0.98]">
+      <span class="material-symbols-outlined text-[20px] text-secondary group-hover:text-on-surface">vpn_key</span>
+      <span class="text-body-md">密钥管理</span>
+    </a>
+    <a data-tab="proxies" class="flex items-center gap-3 px-4 py-2.5 text-secondary hover:text-on-surface hover:bg-surface-container-high transition-all duration-200 rounded-2xl cursor-pointer group active:scale-[0.98]">
+      <span class="material-symbols-outlined text-[20px] text-secondary group-hover:text-on-surface">router</span>
+      <span class="text-body-md">代理池</span>
+    </a>
+    <a data-tab="sources" class="flex items-center gap-3 px-4 py-2.5 text-secondary hover:text-on-surface hover:bg-surface-container-high transition-all duration-200 rounded-2xl cursor-pointer group active:scale-[0.98]">
+      <span class="material-symbols-outlined text-[20px] text-secondary group-hover:text-on-surface">source</span>
+      <span class="text-body-md">代理源</span>
+    </a>
+    <a data-tab="config" class="flex items-center gap-3 px-4 py-2.5 text-secondary hover:text-on-surface hover:bg-surface-container-high transition-all duration-200 rounded-2xl cursor-pointer group active:scale-[0.98]">
+      <span class="material-symbols-outlined text-[20px] text-secondary group-hover:text-on-surface">settings</span>
+      <span class="text-body-md">系统配置</span>
+    </a>
+    <a data-tab="logs" class="flex items-center gap-3 px-4 py-2.5 text-secondary hover:text-on-surface hover:bg-surface-container-high transition-all duration-200 rounded-2xl cursor-pointer group active:scale-[0.98]">
+      <span class="material-symbols-outlined text-[20px] text-secondary group-hover:text-on-surface">list_alt</span>
+      <span class="text-body-md">系统日志</span>
+    </a>
+  </nav>
+  <div class="px-6 pb-4 shrink-0">
+    <div class="flex items-center gap-3 pt-4 border-t border-outline-variant">
+      <div class="w-9 h-9 rounded-full bg-primary-fixed flex items-center justify-center text-on-primary-fixed text-sm font-semibold">K</div>
+      <div class="flex-1 min-w-0">
+        <p class="text-body-md font-medium text-on-surface truncate">管理员</p>
+        <p class="text-label-md text-secondary">opencode-gate</p>
+      </div>
+    </div>
+  </div>
+</aside>
+
+<!-- ===== MAIN ===== -->
+<div id="mainContent" class="flex-1 ml-[260px] min-h-0 flex flex-col transition-all duration-200">
+  <!-- Top Header Bar -->
+  <header id="topHeader" class="sticky top-0 z-40 w-full bg-surface/80 backdrop-blur-lg rounded-b-2xl shadow-md flex justify-between items-center px-6 py-3.5 transition-all">
+    <div class="flex items-center gap-4">
+      <button id="menuBtn" onclick="toggleSidebar()" class="md:hidden w-9 h-9 rounded-2xl border border-border bg-surface flex items-center justify-center text-secondary hover:text-on-surface transition-colors cursor-pointer">
+        <span class="material-symbols-outlined text-xl">menu</span>
+      </button>
+      <h2 id="pageTitle" class="text-headline-md text-headline-md font-bold text-on-surface">仪表盘</h2>
+    </div>
+    <div class="flex items-center gap-4">
+      <span id="warpStatus" class="flex items-center gap-1.5 text-label-md bg-surface-container-high text-secondary px-3 py-1.5 rounded-full border border-outline-variant">
+        <span class="w-2 h-2 rounded-full bg-muted"></span>
+        加载中...
+      </span>
+      <button onclick="toggleTheme()" id="themeBtn" class="w-9 h-9 rounded-2xl border border-border bg-surface flex items-center justify-center text-secondary hover:text-on-surface transition-colors cursor-pointer">
+        <span class="material-symbols-outlined text-xl">dark_mode</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- ===== PAGE CONTENT ===== -->
+  <main class="flex-1 p-6 md:p-8 max-w-[1440px] mx-auto w-full">
+
+    <!-- ===== DASHBOARD ===== -->
+    <div id="tab-dashboard" class="tab-panel">
+      <!-- 统计卡片 -->
+      <div id="statCards" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+        <div class="bg-surface rounded-2xl border border-border p-5 ambient-shadow animate-pulse"><div class="h-4 w-20 bg-surface-container-high rounded mb-3"></div><div class="h-8 w-16 bg-surface-container-high rounded"></div></div>
+        <div class="bg-surface rounded-2xl border border-border p-5 ambient-shadow animate-pulse"><div class="h-4 w-20 bg-surface-container-high rounded mb-3"></div><div class="h-8 w-16 bg-surface-container-high rounded"></div></div>
+        <div class="bg-surface rounded-2xl border border-border p-5 ambient-shadow animate-pulse"><div class="h-4 w-20 bg-surface-container-high rounded mb-3"></div><div class="h-8 w-16 bg-surface-container-high rounded"></div></div>
+        <div class="bg-surface rounded-2xl border border-border p-5 ambient-shadow animate-pulse"><div class="h-4 w-20 bg-surface-container-high rounded mb-3"></div><div class="h-8 w-16 bg-surface-container-high rounded"></div></div>
+      </div>
+      <!-- key 槽位 & 测试区域 -->
+      <div class="grid grid-cols-1 xl:grid-cols-3 gap-6 mb-6">
+        <div class="xl:col-span-2 bg-surface rounded-2xl border border-border ambient-shadow overflow-hidden">
+          <div class="flex items-center justify-between px-5 py-4 border-b border-border">
+            <h3 class="font-semibold text-on-surface flex items-center gap-2">
+              <span class="material-symbols-outlined text-primary text-lg">lan</span>
+              Key 代理槽位
+            </h3>
+            <span id="keySlotCount" class="text-label-md text-secondary"></span>
+          </div>
+          <div id="keySlotWrap" class="p-1 overflow-x-auto"></div>
+        </div>
+        <div class="bg-surface rounded-2xl border border-border ambient-shadow">
+          <div class="flex items-center justify-between px-5 py-4 border-b border-border">
+            <h3 class="font-semibold text-on-surface flex items-center gap-2">
+              <span class="material-symbols-outlined text-primary text-lg">smart_toy</span>
+              Chat 测试
+            </h3>
+          </div>
+          <div class="p-5 space-y-3">
+            <div class="flex items-center gap-3">
+              <div class="flex-1">
+                <label class="text-label-md text-secondary block mb-1">模型</label>
+                <select id="testModel" class="w-full px-3 py-2 bg-surface-container-low border border-border rounded-2xl text-body-md focus:border-primary focus:ring-2 focus:ring-primary/20 transition-all outline-none"></select>
+              </div>
+              <div>
+                <label class="text-label-md text-secondary block mb-1">流式</label>
+                <label class="relative inline-flex items-center cursor-pointer mt-1">
+                  <input id="testStream" type="checkbox" checked class="sr-only peer"/>
+                  <div class="w-10 h-5.5 bg-surface-container-high rounded-full peer peer-checked:bg-primary after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4.5 after:w-4.5 after:transition-all peer-checked:after:translate-x-[18px]"></div>
+                </label>
+              </div>
+            </div>
+            <div>
+              <label class="text-label-md text-secondary block mb-1">密钥</label>
+              <select id="testKeySelect" class="w-full px-3 py-2 bg-surface-container-low border border-border rounded-2xl text-body-md focus:border-primary focus:ring-2 focus:ring-primary/20 transition-all outline-none"></select>
+            </div>
+            <div>
+              <label class="text-label-md text-secondary block mb-1">提示词</label>
+              <textarea id="testPrompt" class="w-full px-3 py-2 bg-surface-container-low border border-border rounded-2xl text-body-md focus:border-primary focus:ring-2 focus:ring-primary/20 transition-all outline-none resize-none h-20" placeholder="在这里输入消息…"></textarea>
+            </div>
+            <button id="testBtn" onclick="sendTest()" class="w-full flex items-center justify-center gap-2 bg-primary text-on-primary px-4 py-2.5 rounded-2xl text-label-md hover:bg-primary-container transition-colors shadow-sm active:scale-[0.98] cursor-pointer">
+              <span class="material-symbols-outlined text-lg">send</span>
+              发送测试
+            </button>
+            <div id="testResult"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== AUDIT ===== -->
+    <div id="tab-audit" class="tab-panel hidden">
+      <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-6">
+        <div>
+          <h2 class="text-headline-sm font-bold text-on-surface">用量审计</h2>
+          <p class="text-body-md text-secondary mt-1">查看 API 调用统计与用量趋势</p>
+        </div>
+        <div class="flex gap-2">
+          <button onclick="fetchAudit()" class="flex items-center gap-1.5 px-3 py-2 bg-surface border border-border text-secondary rounded-2xl text-label-md hover:border-primary hover:text-primary transition-colors cursor-pointer active:scale-[0.98]">
+            <span class="material-symbols-outlined text-lg">refresh</span>
+            刷新
+          </button>
+        </div>
+      </div>
+      <div id="auditCards" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6"></div>
+      <div id="auditWrap" class="bg-surface rounded-2xl border border-border ambient-shadow overflow-hidden">
+        <div class="px-5 py-4 border-b border-border flex items-center justify-between">
+          <h3 class="font-semibold text-on-surface">调用记录</h3>
+          <span id="auditRecordCount" class="text-label-md text-secondary"></span>
+        </div>
+        <div id="auditTable" class="overflow-x-auto"></div>
+      </div>
+    </div>
+
+    <!-- ===== KEYS ===== -->
+    <div id="tab-keys" class="tab-panel hidden">
+      <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-6">
+        <div>
+          <h2 class="text-headline-sm font-bold text-on-surface">密钥管理</h2>
+          <p class="text-body-md text-secondary mt-1">管理 API 访问密钥、并发限制及配额</p>
+        </div>
+        <div class="flex gap-2 w-full sm:w-auto">
+          <div class="relative flex-1 sm:w-56">
+            <span class="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-secondary text-lg">search</span>
+            <input id="keySearch" oninput="filterKeys()" class="w-full pl-10 pr-4 py-2 bg-surface-container-low border border-border rounded-2xl text-body-md focus:border-primary focus:ring-2 focus:ring-primary/20 transition-all outline-none" placeholder="搜索密钥…" type="text"/>
+          </div>
+          <button onclick="showCreateKey()" class="flex items-center gap-1.5 bg-primary text-on-primary px-4 py-2 rounded-2xl text-label-md hover:bg-primary-container transition-colors shadow-sm active:scale-[0.98] whitespace-nowrap cursor-pointer">
+            <span class="material-symbols-outlined text-lg">add</span>
+            创建密钥
+          </button>
+        </div>
+      </div>
+      <div id="keyCards" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6"></div>
+      <div id="keyWrap" class="bg-surface rounded-2xl border border-border ambient-shadow overflow-hidden">
+        <div class="overflow-x-auto" id="keyTable"></div>
+      </div>
+    </div>
+
+    <!-- ===== PROXIES ===== -->
+    <div id="tab-proxies" class="tab-panel hidden">
+      <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-6">
+        <div>
+          <h2 class="text-headline-sm font-bold text-on-surface">代理池管理</h2>
+          <p class="text-body-md text-secondary mt-1">管理代理 IP 池及健康状态</p>
+        </div>
+        <div class="flex gap-2">
+          <button onclick="showImportProxies()" class="flex items-center gap-1.5 px-3 py-2 bg-surface border border-border text-secondary rounded-2xl text-label-md hover:border-primary hover:text-primary transition-colors cursor-pointer active:scale-[0.98]">
+            <span class="material-symbols-outlined text-lg">playlist_add</span>
+            批量导入
+          </button>
+          <button onclick="doAction('refresh',this)" class="flex items-center gap-1.5 px-3 py-2 bg-surface border border-border text-secondary rounded-2xl text-label-md hover:border-primary hover:text-primary transition-colors cursor-pointer active:scale-[0.98]">
+            <span class="material-symbols-outlined text-lg">refresh</span>
+            刷新候选
+          </button>
+          <button onclick="doAction('released/probe',this)" class="flex items-center gap-1.5 px-3 py-2 bg-surface border border-border text-secondary rounded-2xl text-label-md hover:border-primary hover:text-primary transition-colors cursor-pointer active:scale-[0.98]">
+            <span class="material-symbols-outlined text-lg">sensors</span>
+            备用测活
+          </button>
+        </div>
+      </div>
+      <div id="proxyCards" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6"></div>
+      <div id="proxyWrap" class="bg-surface rounded-2xl border border-border ambient-shadow overflow-hidden">
+        <div class="overflow-x-auto" id="proxyTable"></div>
+      </div>
+    </div>
+
+    <!-- ===== SOURCES ===== -->
+    <div id="tab-sources" class="tab-panel hidden">
+      <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-6">
+        <div>
+          <h2 class="text-headline-sm font-bold text-on-surface">代理源管理</h2>
+          <p class="text-body-md text-secondary mt-1">管理上游代理数据源与抓取配置</p>
+        </div>
+        <div class="flex gap-2">
+          <button onclick="showAddSource()" class="flex items-center gap-1.5 bg-primary text-on-primary px-4 py-2 rounded-2xl text-label-md hover:bg-primary-container transition-colors shadow-sm active:scale-[0.98] cursor-pointer">
+            <span class="material-symbols-outlined text-lg">add</span>
+            添加源
+          </button>
+          <button onclick="doAction('sources/refresh',this)" class="flex items-center gap-1.5 px-3 py-2 bg-surface border border-border text-secondary rounded-2xl text-label-md hover:border-primary hover:text-primary transition-colors cursor-pointer active:scale-[0.98]">
+            <span class="material-symbols-outlined text-lg">refresh</span>
+            刷新源
+          </button>
+        </div>
+      </div>
+      <div id="sourceWrap" class="bg-surface rounded-2xl border border-border ambient-shadow overflow-hidden">
+        <div class="overflow-x-auto" id="sourceTable"></div>
+      </div>
+    </div>
+
+    <!-- ===== CONFIG ===== -->
+    <div id="tab-config" class="tab-panel hidden">
+      <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-6">
+        <div>
+          <h2 class="text-headline-sm font-bold text-on-surface">系统配置</h2>
+          <p class="text-body-md text-secondary mt-1">管理系统核心网络与网关参数</p>
+        </div>
+        <div class="flex gap-2">
+          <button onclick="fetchConfig()" class="flex items-center gap-1.5 px-3 py-2 bg-surface border border-border text-secondary rounded-2xl text-label-md hover:border-primary hover:text-primary transition-colors cursor-pointer active:scale-[0.98]">
+            <span class="material-symbols-outlined text-lg">refresh</span>
+            重新加载
+          </button>
+        </div>
+      </div>
+      <div id="configForm" class="bg-surface rounded-2xl border border-border ambient-shadow p-6 max-w-2xl">
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
+          <div>
+            <label class="text-label-md text-secondary block mb-1.5" for="cfgPort">监听端口</label>
+            <input id="cfgPort" class="w-full px-3 py-2 bg-surface-container-low border border-border rounded-2xl text-body-md focus:border-primary focus:ring-2 focus:ring-primary/20 transition-all outline-none font-mono text-mono-md"/>
+          </div>
+          <div>
+            <label class="text-label-md text-secondary block mb-1.5" for="cfgConcurrency">最大活跃 Key 数</label>
+            <input id="cfgConcurrency" class="w-full px-3 py-2 bg-surface-container-low border border-border rounded-2xl text-body-md focus:border-primary focus:ring-2 focus:ring-primary/20 transition-all outline-none" type="number"/>
+          </div>
+          <div>
+            <label class="text-label-md text-secondary block mb-1.5" for="cfgSlotCount">每 Key 槽位数</label>
+            <input id="cfgSlotCount" class="w-full px-3 py-2 bg-surface-container-low border border-border rounded-2xl text-body-md focus:border-primary focus:ring-2 focus:ring-primary/20 transition-all outline-none" type="number"/>
+          </div>
+          <div>
+            <label class="text-label-md text-secondary block mb-1.5" for="cfgRefreshMs">代理刷新间隔 (ms)</label>
+            <input id="cfgRefreshMs" class="w-full px-3 py-2 bg-surface-container-low border border-border rounded-2xl text-body-md focus:border-primary focus:ring-2 focus:ring-primary/20 transition-all outline-none" type="number"/>
+          </div>
+          <div>
+            <label class="text-label-md text-secondary block mb-1.5" for="cfgWarpMode">WARP 模式</label>
+            <select id="cfgWarpMode" class="w-full px-3 py-2 bg-surface-container-low border border-border rounded-2xl text-body-md focus:border-primary focus:ring-2 focus:ring-primary/20 transition-all outline-none">
+              <option value="off">关闭</option>
+              <option value="on">开启</option>
+              <option value="fallback">备用</option>
+            </select>
+          </div>
+          <div>
+            <label class="text-label-md text-secondary block mb-1.5" for="cfgFallback">Fallback 代理</label>
+            <input id="cfgFallback" class="w-full px-3 py-2 bg-surface-container-low border border-border rounded-2xl text-body-md focus:border-primary focus:ring-2 focus:ring-primary/20 transition-all outline-none font-mono text-mono-md" placeholder="socks5://127.0.0.1:1080"/>
+          </div>
+        </div>
+        <div class="mt-6 flex gap-3">
+          <button id="cfgSaveBtn" onclick="saveConfig()" class="flex items-center gap-2 bg-primary text-on-primary px-5 py-2.5 rounded-2xl text-label-md hover:bg-primary-container transition-colors shadow-sm active:scale-[0.98] cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed">
+            <span class="material-symbols-outlined text-lg">save</span>
+            保存配置
+          </button>
+          <button onclick="fetchConfig()" class="flex items-center gap-2 px-5 py-2.5 bg-surface border border-border text-secondary rounded-2xl text-label-md hover:border-primary hover:text-primary transition-colors cursor-pointer active:scale-[0.98]">
+            <span class="material-symbols-outlined text-lg">close</span>
+            取消
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== LOGS ===== -->
+    <div id="tab-logs" class="tab-panel hidden">
+      <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-6">
+        <div>
+          <h2 class="text-headline-sm font-bold text-on-surface">系统日志</h2>
+          <p class="text-body-md text-secondary mt-1">实时查看网关运行日志</p>
+        </div>
+        <div class="flex gap-2">
+          <button onclick="fetchLogs()" class="flex items-center gap-1.5 bg-primary text-on-primary px-4 py-2 rounded-2xl text-label-md hover:bg-primary-container transition-colors shadow-sm active:scale-[0.98] cursor-pointer">
+            <span class="material-symbols-outlined text-lg">refresh</span>
+            刷新日志
+          </button>
+          <button onclick="document.getElementById('logBox').scrollTop=0" class="flex items-center gap-1.5 px-3 py-2 bg-surface border border-border text-secondary rounded-2xl text-label-md hover:border-primary hover:text-primary transition-colors cursor-pointer active:scale-[0.98]">
+            <span class="material-symbols-outlined text-lg">vertical_align_top</span>
+            回到顶部
+          </button>
+        </div>
+      </div>
+      <div id="logBox" class="bg-[#0d1117] text-[#7ee787] p-5 rounded-2xl font-mono text-mono-md leading-relaxed whitespace-pre-wrap overflow-auto h-[65vh] min-h-[350px] border border-white/5"></div>
+    </div>
+
+  </main>
 </div>
-<div class="main">
-<div class="header">
-<div style="display:flex;align-items:center;gap:6px">
-<button class="menu-btn" onclick="toggleSidebar()" id="menuBtn">☰</button>
-<h1 id="pageTitle">📊 仪表盘</h1>
+
+<!-- ===== MODAL ===== -->
+<div id="modal" class="fixed inset-0 z-[100] flex items-center justify-center hidden">
+  <div class="absolute inset-0 bg-black/30 backdrop-blur-sm" onclick="closeModal()"></div>
+  <div class="relative bg-surface rounded-2xl shadow-2xl w-[480px] max-w-[92vw] max-h-[85vh] overflow-y-auto p-6 animate-modal-in"></div>
 </div>
-<div><button class="theme-toggle" onclick="toggleTheme()" id="themeBtn">🌙</button></div>
-</div>
-<div id="tab-dashboard" class="tab-panel">
-<div class="stats" id="statCards"></div>
-<h3 style="font-size:13px;margin:14px 0 6px">🔑 Key 槽位状态</h3>
-<div class="table-wrap" id="keySlotWrap"><div style="padding:16px"><div class="skeleton skeleton-block"></div><div class="skeleton skeleton-line"></div><div class="skeleton skeleton-line" style="width:70%"></div></div></div>
-<div class="actions">
-<button class="btn btn-outline" onclick="doAction('sources/refresh',this)">🔄 刷新代理源</button>
-<button class="btn btn-outline" onclick="doAction('slots/fill',this)">🔧 填充槽位</button>
-<button class="btn btn-outline" onclick="doAction('candidates/load',this)">📦 加载候选</button>
-</div>
-<div class="test-area">
-<h3>发送测试</h3>
-<div class="test-grid">
-<div><label style="font-size:11px;color:var(--muted)">模型</label><select id="testModel"><option>加载中...</option></select></div>
-<div><label style="font-size:11px;color:var(--muted)">消息</label><input id="testPrompt" value="hi"></div>
-<div><label style="font-size:11px;color:var(--muted)">API Key</label><select id="testKeySelect"><option value="">加载中...</option></select></div>
-<button class="btn btn-primary" onclick="sendTest()" id="testBtn">▶️ 发送</button>
-</div>
-<div id="testResult"></div>
-</div>
-</div>
-<div id="tab-audit" class="tab-panel" style="display:none">
-<div class="stats" id="auditSummary"></div>
-<h3 style="font-size:13px;margin:14px 0 6px">🔑 按 Key 统计</h3>
-<div class="table-wrap" id="auditKeyWrap"><div style="padding:16px"><div class="skeleton skeleton-block"></div><div class="skeleton skeleton-line"></div><div class="skeleton skeleton-line" style="width:60%"></div></div></div>
-<h3 style="font-size:13px;margin:14px 0 6px">📊 按模型统计</h3>
-<div class="table-wrap" id="auditModelWrap"><div style="padding:16px"><div class="skeleton skeleton-block"></div><div class="skeleton skeleton-line"></div></div></div>
-<h3 style="font-size:13px;margin:14px 0 6px">📅 每日统计</h3>
-<div class="table-wrap" id="auditDayWrap"><div style="padding:16px"><div class="skeleton skeleton-block"></div><div class="skeleton skeleton-line" style="width:40%"></div></div></div>
-<h3 style="font-size:13px;margin:14px 0 6px">📋 调用详情</h3>
-<div class="table-wrap" id="auditDetailWrap"><div style="padding:16px"><div class="skeleton skeleton-block"></div><div class="skeleton skeleton-line"></div><div class="skeleton skeleton-line" style="width:80%"></div></div></div>
-</div>
-<div id="tab-keys" class="tab-panel" style="display:none">
-<div class="actions"><button class="btn btn-primary" onclick="showAddKey()">➕ 添加密钥</button></div>
-<div class="table-wrap" id="keyTableWrap"></div>
-</div>
-<div id="tab-proxies" class="tab-panel" style="display:none">
-<div class="actions">
-<button class="btn btn-primary" onclick="showAddProxies()">➕ 添加代理</button>
-<button class="btn btn-outline" onclick="doAction('released/probe',this)">🔍 测活备用池</button>
-<button class="btn btn-outline" onclick="doAction('released/promote',this)">⬆️ 提拔备用池</button>
-</div>
-<div class="table-wrap" id="proxyTableWrap"></div>
-<h3 style="font-size:13px;margin:14px 0 6px">🔄 备用候选池</h3>
-<div class="table-wrap" id="releasedTableWrap"></div>
-</div>
-<div id="tab-sources" class="tab-panel" style="display:none">
-<div class="actions"><button class="btn btn-primary" onclick="showAddSource()">➕ 添加源</button></div>
-<div class="table-wrap" id="sourceTableWrap"></div>
-</div>
-<div id="tab-config" class="tab-panel" style="display:none">
-<div id="configForm"></div>
-</div>
-<div id="tab-logs" class="tab-panel" style="display:none">
-<div class="actions"><button class="btn btn-outline" onclick="doAction('server/logs',this)">🔄 刷新</button></div>
-<div id="logBox"></div>
-</div>
-</div>
-<div id="toast"></div>
-<div id="modal"></div>
-<div id="sidebarOverlay" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;z-index:5;background:rgba(0,0,0,.3)" onclick="toggleSidebar()"></div>
+
 <script src="/public/app.js"></script>
 </body>
 </html>

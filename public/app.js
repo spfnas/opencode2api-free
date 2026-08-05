@@ -1,525 +1,599 @@
-var $=function(i){return document.getElementById(i)};
+/* ============================================================
+   opencode-free-gate · app.js (对接本地 API)
+   ============================================================ */
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+function toast(msg, type) {
+  const el = $('toast');
+  if (!el) return;
+  el.innerHTML = `<span class="material-symbols-outlined text-[18px] ${type === 'ok' ? 'text-success' : 'text-error'}">${type === 'ok' ? 'check_circle' : 'error'}</span> ${esc(msg)}`;
+  el.className = 'fixed bottom-7 left-1/2 -translate-x-1/2 z-[1000] flex items-center gap-2 px-6 py-3 rounded-xl shadow-2xl bg-[#111827] text-white text-sm font-medium';
+  clearTimeout(el._t);
+  el._t = setTimeout(() => {
+    el.className = 'fixed bottom-7 left-1/2 -translate-x-1/2 z-[1000] flex items-center gap-2 px-6 py-3 rounded-xl shadow-2xl bg-[#111827] text-white text-sm font-medium opacity-0 pointer-events-none transition-all duration-300';
+  }, 3000);
+}
+async function api(u, method, body) {
+  const o = { method: method || 'GET', headers: { 'Content-Type': 'application/json' } };
+  if (body) o.body = JSON.stringify(body);
+  const r = await fetch(u, o);
+  const d = await r.json();
+  if (!r.ok) throw new Error(d.error || d.message || 'HTTP ' + r.status);
+  return d;
+}
+function toggleSidebar() {
+  const s = $('sidebar'), o = $('sidebarOverlay');
+  if (!s) return;
+  if (s.classList.contains('open')) { s.classList.remove('open'); if(o)o.style.display='none'; }
+  else { s.classList.add('open'); if(o)o.style.display='block'; }
+}
+function closeSidebar() {
+  const s = $('sidebar'), o = $('sidebarOverlay');
+  if(s)s.classList.remove('open'); if(o)o.style.display='none';
+}
+function closeModal() {
+  const m = $('modal'), o = $('sidebarOverlay'), s = $('sidebar');
+  if(m)m.innerHTML=''; if(m)m.classList.add('hidden');
+  if(o)o.style.display='none'; if(s)s.classList.remove('open');
+}
+function showModal(html) {
+  const m = $('modal');
+  if (!m) return;
+  m.innerHTML = `<div class="absolute inset-0 bg-black/30 backdrop-blur-sm" onclick="closeModal()"></div><div class="relative bg-surface rounded-2xl shadow-2xl w-[480px] max-w-[92vw] max-h-[85vh] overflow-y-auto p-6 animate-modal-in">${html}</div>`;
+  const o = $('sidebarOverlay'); if(o)o.style.display='none';
+  m.classList.remove('hidden');
+}
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+function toggleTheme() {
+  const h = document.documentElement, btn = $('themeBtn');
+  if (h.classList.contains('dark')) {
+    h.classList.remove('dark'); h.classList.add('light');
+    if(btn)btn.innerHTML='<span class="material-symbols-outlined text-xl">dark_mode</span>';
+    localStorage.setItem('theme','light');
+  } else {
+    h.classList.remove('light'); h.classList.add('dark');
+    if(btn)btn.innerHTML='<span class="material-symbols-outlined text-xl">light_mode</span>';
+    localStorage.setItem('theme','dark');
+  }
+}
+(function(){
+  const s = localStorage.getItem('theme');
+  if (s === 'dark' || (!s && matchMedia('(prefers-color-scheme:dark)').matches)) {
+    document.documentElement.classList.remove('light');
+    document.documentElement.classList.add('dark');
+    const btn = $('themeBtn'); if(btn)btn.innerHTML='<span class="material-symbols-outlined text-xl">light_mode</span>';
+  }
+})();
 
-function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+let currentTab = 'dashboard';
+const titles = { dashboard:'仪表盘', audit:'用量审计', keys:'密钥管理', proxies:'代理池', sources:'代理源', config:'系统配置', logs:'系统日志' };
+const loaders = { dashboard: fetchDashboard, audit: fetchAudit, keys: fetchKeys, proxies: fetchProxies, sources: fetchSources, config: fetchConfig, logs: fetchLogs };
 
-function toggleSidebar(){var s=$('sidebar'),o=$('sidebarOverlay');if(s.classList.contains('open')){s.classList.remove('open');o.style.display='none'}else{s.classList.add('open');o.style.display='block'}}
+document.addEventListener('DOMContentLoaded', function() {
+  const nav = $('nav');
+  if(nav) nav.addEventListener('click', function(e) {
+    const a = e.target.closest('[data-tab]');
+    if (!a) return;
+    currentTab = a.dataset.tab;
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.add('hidden'));
+    const panel = $('tab-' + currentTab); if(panel) panel.classList.remove('hidden');
+    document.querySelectorAll('#nav [data-tab]').forEach(x => {
+      x.classList.remove('bg-primary-container','text-on-primary-container','font-medium');
+      x.classList.add('text-secondary');
+    });
+    a.classList.remove('text-secondary');
+    a.classList.add('bg-primary-container','text-on-primary-container','font-medium');
+    const pt = $('pageTitle'); if(pt) pt.textContent = titles[currentTab];
+    if (loaders[currentTab]) loaders[currentTab]();
+  });
+  const first = document.querySelector('#nav [data-tab="dashboard"]');
+  if(first) { first.classList.remove('text-secondary'); first.classList.add('bg-primary-container','text-on-primary-container','font-medium'); }
+  setTimeout(() => { if(loaders.dashboard) loaders.dashboard(); }, 100);
+});
 
-function toast(m,t){var e=$('toast');e.innerHTML='<span>'+(t==='ok'?'✅':'❌')+'</span> '+esc(m);e.className='show';clearTimeout(e._t);e._t=setTimeout(function(){e.className='hiding';setTimeout(function(){e.className=''},250)},3000)}
+const timers = {};
+function startRefresh(tab, fn, interval) {
+  if (timers[tab]) clearInterval(timers[tab]);
+  timers[tab] = setInterval(() => { if (currentTab === tab) fn(); }, interval);
+}
 
-async function api(u,method,body){var o={method:method||'GET',headers:{'Content-Type':'application/json'}};if(body)o.body=JSON.stringify(body);var r=await fetch(u,o);var d=await r.json();if(!r.ok)throw new Error(d.error||d.message||'HTTP '+r.status);return d}
+async function doAction(path, btn) {
+  const orig = btn.innerHTML;
+  btn.innerHTML = '<span class="material-symbols-outlined text-lg animate-spin">sync</span>';
+  btn.disabled = true;
+  try { await api('/api/' + path, 'POST', {}); toast('操作成功: '+path, 'ok'); }
+  catch (e) { toast('操作失败: '+e.message, 'err'); }
+  btn.innerHTML = orig; btn.disabled = false;
+  if (currentTab === 'dashboard') fetchDashboard();
+}
 
-function closeModal(){$('modal').innerHTML='';$('sidebarOverlay').style.display='none';$('sidebar').classList.remove('open')}
-
-document.addEventListener('keydown',function(e){if(e.key==='Escape')closeModal()})
-
-// 主题切换：默认暗色，添加 .light 切到亮色
-function toggleTheme(){var h=document.documentElement;if(h.classList.contains('light')){h.classList.remove('light');$('themeBtn').textContent='🌙';localStorage.setItem('theme','dark')}else{h.classList.add('light');$('themeBtn').textContent='☀️';localStorage.setItem('theme','light')}}
-
-(function(){var s=localStorage.getItem('theme');if(s==='light'||(!s&&matchMedia('(prefers-color-scheme:light)').matches)){document.documentElement.classList.add('light');$('themeBtn').textContent='☀️'}})();
-
-
-
-var currentTab='dashboard';
-
-var titles={dashboard:'📊 仪表盘',audit:'📈 用量审计',keys:'🔑 密钥管理',proxies:'🔄 代理池',sources:'📡 代理源',config:'⚙️ 配置',logs:'📋 日志'};
-
-var loaders={dashboard:fetchDashboard,audit:fetchAudit,keys:fetchKeys,proxies:fetchProxies,sources:fetchSources,config:fetchConfig,logs:fetchLogs};
-
-$('nav').addEventListener('click',function(e){var a=e.target.closest('a[data-tab]');if(!a)return;currentTab=a.dataset.tab;document.querySelectorAll('.tab-panel').forEach(function(p){p.style.display='none'});$('tab-'+currentTab).style.display='';document.querySelectorAll('.sidebar nav a').forEach(function(x){x.classList.remove('active')});a.classList.add('active');$('pageTitle').textContent=titles[currentTab];if(loaders[currentTab])loaders[currentTab]()});
-
-
-
-var timers={};
-
-function startRefresh(tab,fn,interval){if(timers[tab])clearInterval(timers[tab]);timers[tab]=setInterval(function(){if(currentTab===tab)fn()},interval)}
-
-
-
-async function doAction(path,btn){var orig=btn.innerHTML;btn.innerHTML='<span class="spinner spinner-dark"></span>';btn.disabled=true;try{await api('/api/'+path,'POST',{});toast('已触发 '+path)}catch(e){toast(e.message)}btn.innerHTML=orig;btn.disabled=false;if(currentTab==='dashboard')fetchDashboard()}
-
-
+function statCard(icon, label, value, sub, color) {
+  const colors = { primary:'bg-primary/10 text-primary', success:'bg-success/10 text-success', warning:'bg-warning/10 text-warning', info:'bg-info/10 text-info', red:'bg-error/10 text-error' };
+  const c = colors[color] || colors.primary;
+  return `<div class="bg-surface rounded-xl border border-border p-5 ambient-shadow hover:shadow-md hover:border-primary/30 transition-all">
+      <div class="flex items-center gap-3 mb-2">
+        <div class="w-9 h-9 rounded-full ${c} flex items-center justify-center"><span class="material-symbols-outlined text-lg">${icon}</span></div>
+        <span class="text-label-md text-secondary">${esc(label)}</span>
+      </div>
+      <div class="flex items-end gap-2 mt-2">
+        <span class="text-display-lg text-on-surface font-bold tracking-tight">${esc(value == null ? '0' : String(value))}</span>
+        ${sub != null ? `<span class="text-body-md text-secondary mb-1">/ ${esc(String(sub))}</span>` : ''}
+      </div>
+    </div>`;
+}
+function badge(text, type) {
+  const t = { green:'bg-success/10 text-success', amber:'bg-warning/10 text-warning', red:'bg-error/10 text-error', blue:'bg-info/10 text-info', gray:'bg-surface-container-high text-secondary', active:'bg-success/10 text-success', pending:'bg-warning/10 text-warning', disabled:'bg-surface-container-high text-secondary' };
+  return `<span class="inline-flex items-center px-2 py-0.5 rounded-full text-label-md font-medium ${t[type] || t.gray}">${esc(text)}</span>`;
+}
+function renderTable(headers, rows, emptyMsg) {
+  if (!rows || !rows.length) return `<div class="text-center py-12"><span class="material-symbols-outlined text-5xl text-secondary/30 block mb-3">database</span><p class="text-body-md text-secondary">${esc(emptyMsg || '暂无数据')}</p></div>`;
+  return `<table class="w-full text-body-md"><thead><tr class="border-b border-outline-variant bg-surface-container-low">${headers.map(h => `<th class="text-left px-4 py-3 text-label-md text-secondary font-semibold">${esc(h)}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table>`;
+}
+function statRow(cells) {
+  return `<tr class="border-b border-outline-variant hover:bg-surface-container-low transition-colors">${cells.map(c => `<td class="px-4 py-3">${c}</td>`).join('')}</tr>`;
+}
+function skeletonCards(count) {
+  let h = '';
+  for(let i=0;i<count;i++) h += `<div class="bg-surface rounded-xl border border-border p-5 ambient-shadow animate-pulse"><div class="h-3 w-20 bg-surface-container-high rounded mb-3"></div><div class="h-7 w-14 bg-surface-container-high rounded"></div></div>`;
+  return h;
+}
 
 /* ===== DASHBOARD ===== */
-
-async function fetchDashboard(){
-
-startRefresh('dashboard',fetchDashboard,10000);
-
-try{var s=await api('/api/status');
-
-var wc=(s.warpStatus==='running'||(s.warpMode==='on'&&s.warpStatus!=='stopped'))?'green':'red';
-
-var wtx=(s.warpStatus==='running'||(s.warpMode==='on'&&s.warpStatus!=='stopped'))?'✅ 运行中':'❌ 未运行';
-
-var rate=s.stats.total>0?((s.stats.success/s.stats.total)*100).toFixed(1)+'%':'—';
-
-var rc=parseFloat(rate)>=90?'green':parseFloat(rate)>=70?'amber':'red';
-
-var pct=s.slotCount>0?((s.slotsReady/s.slotCount)*100):0;
-
-var cands=s.candidatesCount!==undefined?s.candidatesCount:s.candidates||0;
-
-var fbOk=s.fallbackAvailable?'✅ 可用':'❌ 未配置';
-
-var fbAddr=s.fallbackAddr?' <span style="font-size:10px;color:var(--muted)">('+esc(s.fallbackAddr)+')</span>':'';
-
-$('statCards').innerHTML=
-
-'<div class="stat-card"><div class="label">在线槽位</div><div class="value blue">'+s.slotsReady+' / '+s.slotCount+'</div><div class="progress"><div class="progress-bar" style="width:'+pct+'%"></div></div></div>'+
-
-'<div class="stat-card"><div class="label">候选代理</div><div class="value amber">'+cands.toLocaleString()+'</div></div>'+
-
-'<div class="stat-card"><div class="label">备用池</div><div class="value blue">'+(s.releasedCandidatesCount||0).toLocaleString()+'</div></div>'+
-
-'<div class="stat-card"><div class="label">总请求</div><div class="value">'+s.stats.total.toLocaleString()+'</div></div>'+
-
-'<div class="stat-card"><div class="label">成功率</div><div class="value '+rc+'">'+rate+'</div></div>'+
-
-'<div class="stat-card"><div class="label">WARP 状态</div><div class="value '+wc+'" style="font-size:14px">'+wtx+'</div><div class="sub">模式: '+esc(s.warpMode||'off')+'</div></div>'+
-
-'<div class="stat-card"><div class="label">自定义 Fallback</div><div class="value" style="font-size:13px">'+fbOk+fbAddr+'</div></div>';
-
-// Key 槽位状态
-
-var pools=s.pools||[];
-
-$('keySlotWrap').innerHTML=pools.length?'<table><thead><tr><th>Key</th><th>名称</th><th>槽位</th><th>代理地址</th><th>延时</th><th>请求数</th><th>最后使用</th></tr></thead><tbody>'+pools.map(function(p){
-
-var slotsHtml=p.slots&&p.slots.length?p.slots.map(function(sl){return '<code>'+esc(sl.addr)+'</code> <span class="tag tag-'+(sl.latencyMs<500?'green':sl.latencyMs<2000?'amber':'red')+'">'+sl.latencyMs+'ms</span>'}).join('<br>'):'<span style="color:var(--muted)">无</span>';
-
-return '<tr><td><code>'+esc(p.key)+'</code></td><td>'+esc(p.name)+'</td><td><span class="tag tag-'+(p.slots&&p.slots.length?'active':'pending')+'">'+(p.slots?p.slots.length:0)+' / 3</span></td><td style="font-size:12px">'+slotsHtml+'</td><td>'+(p.lastUsedAt?new Date(p.lastUsedAt).toLocaleString():'从未')+'</td><td>'+p.requestCount+'</td></tr>'
-
-}).join('')+'</tbody></table>':'<div style="padding:12px;color:var(--muted)">暂无活跃 Key</div>';
-
-}catch(e){$('statCards').innerHTML='<div class="stat-card" style="color:var(--red)">加载失败: '+esc(e.message)+'</div>'}
-
-fetchModels();fetchDashboardKeys();
-
+async function fetchDashboard() {
+  startRefresh('dashboard', fetchDashboard, 10000);
+  try {
+    const s = await api('/api/status');
+    const st = s.stats || {};
+    const sc = $('statCards');
+    if(sc) sc.innerHTML = statCard('key','API Key 总数', s.totalApiKeys||0, null, 'primary') + statCard('speed','活跃 Key', s.activeKeys||0, s.maxActiveKeys||20, 'info') + statCard('bar_chart','请求总数', st.total||0, null, 'warning') + statCard('public','代理池规模', s.candidatesCount||0, null, 'success');
+    const ws = $('warpStatus');
+    if(ws) ws.innerHTML = `<span class="w-2 h-2 rounded-full ${s.warpAvailable?'bg-success':'bg-muted'}"></span> ${esc(s.warpStatus||'unknown')}`;
+    const pools = s.pools || [];
+    const ksc = $('keySlotCount'); if(ksc) ksc.textContent = pools.length + ' 个活跃 Key';
+    const ksw = $('keySlotWrap');
+    if(ksw) {
+      if(pools.length) {
+        ksw.innerHTML = renderTable(['Key','名称','槽位','代理地址','延时','质量','请求数','最后使用'],
+          pools.map(p => statRow([
+            `<code class="text-mono-md px-1.5 py-0.5 bg-surface-container-high rounded">${esc(p.key)}</code>`, esc(p.name||''),
+            badge((p.slots?p.slots.length:0)+' / 3', (p.slots&&p.slots.length)?'active':'pending'),
+            `<span class="text-sm">${p.slots&&p.slots.length ? p.slots.map(sl => `<code class="text-mono-md px-1.5 py-0.5 bg-surface-container-high rounded">${esc(sl.addr)}</code>`).join('<br>') : '<span class="text-secondary">无</span>'}</span>`,
+            p.slots&&p.slots.length ? p.slots.map(sl => badge(sl.latencyMs+'ms', sl.latencyMs<500?'green':sl.latencyMs<2000?'amber':'red')).join('<br>') : '-',
+            p.slots&&p.slots.length ? p.slots.map(sl => badge(sl.grade||'C', sl.grade==='S'?'green':sl.grade==='A'?'blue':'gray')).join('<br>') : '-',
+            p.requestCount||0, p.lastUsedAt ? new Date(p.lastUsedAt).toLocaleString('zh-CN') : '从未'
+          ]))
+        );
+      } else {
+        ksw.innerHTML = `<div class="text-center py-12"><span class="material-symbols-outlined text-5xl text-secondary/30 block mb-3">lan</span><p class="text-body-md text-secondary">暂无活跃 Key</p></div>`;
+      }
+    }
+    fetchModels(); fetchDashboardKeys();
+  } catch(e) { const sc = $('statCards'); if(sc) sc.innerHTML = skeletonCards(4); }
 }
 
-async function fetchModels(){try{var s=await api('/api/models');$('testModel').innerHTML=s.models&&s.models.length?s.models.map(function(m){return '<option value="'+esc(m.id)+'">'+esc(m.displayName||m.id)+'</option>'}).join(''):'<option>无可用模型</option>'}catch(e){$('testModel').innerHTML='<option>加载失败</option>'}}
-
-async function fetchDashboardKeys(){try{var s=await api('/api/keys');var k=s.keys||[];var enabled=k.filter(function(x){return x.enabled!==false});if(enabled.length){$('testKeySelect').innerHTML=enabled.map(function(x,i){return '<option value="'+esc(x.fullKey||x.key)+'"'+(i===0?' selected':'')+'>'+esc(x.name||x.key.slice(0,8))+'</option>'}).join('')}else{$('testKeySelect').innerHTML='<option value="">无可用密钥</option>'}}catch(e){}}
-
-async function sendTest(){
-
-var btn=$('testBtn'),mod=$('testModel').value,msg=$('testPrompt').value,key=$('testKeySelect').value;
-
-if(!msg){toast('请输入消息');return}
-
-btn.innerHTML='<span class="spinner"></span> 发送中...';btn.disabled=true;var res=$('testResult');
-
-try{var h={'Content-Type':'application/json'};if(key)h['Authorization']='Bearer '+key;
-
-var r=await fetch('/openai/v1/chat/completions',{method:'POST',headers:h,body:JSON.stringify({model:mod,messages:[{role:'user',content:msg}],stream:false})});
-
-var d=await r.json();if(!r.ok)throw new Error(d.error&&d.error.message?d.error.message:JSON.stringify(d));
-
-var content=d.choices&&d.choices[0]?d.choices[0].message.content:JSON.stringify(d);
-
-var usage=d.usage?'\n\n---\nTokens: '+d.usage.total_tokens+' (prompt: '+d.usage.prompt_tokens+', completion: '+d.usage.completion_tokens+')':'';
-
-res.className='test-result test-ok';res.textContent='✅ 成功\n'+content+usage;
-
-}catch(e){res.className='test-result test-err';res.textContent='❌ 错误: '+e.message}
-
-btn.innerHTML='▶️ 发送';btn.disabled=false;
-
+async function fetchModels() {
+  try {
+    const s = await api('/api/models');
+    const el = $('testModel'); if(!el) return;
+    const prev = el.value || localStorage.getItem('lastTestModel') || '';
+    el.innerHTML = s.models && s.models.length ? s.models.map(m => `<option value="${esc(m.id)}">${esc(m.id)}</option>`).join('') : '<option>无可用模型</option>';
+    if (prev && s.models && s.models.some(m => m.id === prev)) {
+      el.value = prev;
+    }
+    localStorage.setItem('lastTestModel', el.value || '');
+    el.addEventListener('change', () => localStorage.setItem('lastTestModel', el.value));
+  } catch(_) { const el = $('testModel'); if(el) el.innerHTML = '<option>加载失败</option>'; }
 }
 
+async function fetchDashboardKeys() {
+  try {
+    const s = await api('/api/keys');
+    const k = s.keys || [];
+    const enabled = k.filter(x => x.enabled !== false);
+    const el = $('testKeySelect'); if(!el) return;
+    el.innerHTML = enabled.length ? enabled.map((x,i) => `<option value="${esc(x.fullKey||x.key)}"${i===0?' selected':''}>${esc(x.name||x.key.slice(0,8))}</option>`).join('') : '<option value="">无可用密钥</option>';
+  } catch(_) {}
+}
 
+async function sendTest() {
+  const btn = $('testBtn'), mod = $('testModel'), msg = $('testPrompt'), key = $('testKeySelect'), streamCb = $('testStream');
+  if (!btn||!mod||!msg||!key) return;
+  if (!msg.value) { toast('请输入消息','err'); return; }
+  btn.innerHTML = '<span class="material-symbols-outlined text-lg animate-spin">sync</span> 发送中...'; btn.disabled = true;
+  const res = $('testResult');
+  if (!res) return;
+  res.className = 'mt-3 p-3 rounded-2xl bg-surface-container-low border border-border text-body-md max-h-96 overflow-y-auto font-mono whitespace-pre-wrap';
+  res.innerHTML = '<span class="text-secondary animate-pulse">等待响应...</span>';
+
+  const useStream = streamCb ? streamCb.checked : false;
+  try {
+    const h = {'Content-Type':'application/json'};
+    if(key.value) h['Authorization'] = 'Bearer '+key.value;
+
+    if (useStream) {
+      // === 流式模式 ===
+      const resp = await fetch('/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: h,
+        body: JSON.stringify({model:mod.value,messages:[{role:'user',content:msg.value}],stream:true})
+      });
+      if (!resp.ok) {
+        const errData = await resp.json().catch(() => ({}));
+        throw new Error(errData.error?.message || `HTTP ${resp.status}`);
+      }
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let content = '';
+      let usageInfo = '';
+      res.innerHTML = '';
+      const outDiv = res;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, {stream: true});
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          const data = line.slice(6).trim();
+          if (data === '[DONE]') continue;
+          try {
+            const chunk = JSON.parse(data);
+            const delta = chunk.choices?.[0]?.delta?.content;
+            if (delta) content += delta;
+            if (chunk.usage) {
+              const u = chunk.usage;
+              usageInfo = `\n\n—— 结束 ——\nTokens: ${u.total_tokens || u.totalTokens || '?'} (prompt: ${u.prompt_tokens || u.promptTokens || '?'}, completion: ${u.completion_tokens || u.completionTokens || '?'})`;
+            }
+            outDiv.innerHTML = esc(content) + (usageInfo ? `<span class="text-secondary/60 block mt-3 pt-2 border-t border-border text-label-md">${usageInfo}</span>` : '');
+          } catch {}
+        }
+      }
+      // 处理可能的剩余 buffer
+      if (!usageInfo && content) {
+        outDiv.innerHTML = esc(content) + `<span class="text-secondary/60 block mt-3 pt-2 border-t border-border text-label-md">—— 流式结束 ——</span>`;
+      }
+    } else {
+      // === 非流式模式 ===
+      const r = await fetch('/openai/v1/chat/completions',{method:'POST',headers:h,body:JSON.stringify({model:mod.value,messages:[{role:'user',content:msg.value}],stream:false})});
+      const d = await r.json();
+      if(!r.ok) throw new Error(d.error&&d.error.message?d.error.message:JSON.stringify(d));
+      const content = d.choices&&d.choices[0]?d.choices[0].message.content:JSON.stringify(d);
+      const usage = d.usage?`Tokens: ${d.usage.total_tokens} (prompt: ${d.usage.prompt_tokens}, completion: ${d.usage.completion_tokens})`:'';
+      res.innerHTML = `<span class="flex items-center gap-1 text-success mb-1"><span class="material-symbols-outlined text-lg">check_circle</span> 成功</span>` + esc(content) + (usage ? `<span class="text-secondary/60 block mt-2 pt-2 border-t border-border text-label-md">${usage}</span>` : '');
+    }
+  } catch(e) {
+    res.className = 'mt-3 p-3 rounded-2xl bg-error/5 border border-error/30 text-body-md whitespace-pre-wrap';
+    res.innerHTML = `<span class="flex items-center gap-1 text-error mb-1"><span class="material-symbols-outlined text-lg">error</span> 错误</span><code class="text-mono-md">${esc(e.message)}</code>`;
+  }
+  btn.innerHTML = '<span class="material-symbols-outlined text-lg">send</span> 发送测试'; btn.disabled = false;
+}
 
 /* ===== AUDIT ===== */
-
-async function fetchAudit(){
-
-startRefresh('audit',fetchAudit,30000);
-
-try{var s=await api('/api/audit');var sm=s.summary||{};
-
-$('auditSummary').innerHTML=
-
-'<div class="stat-card"><div class="label">总请求</div><div class="value">'+sm.totalRequests.toLocaleString()+'</div></div>'+
-
-'<div class="stat-card"><div class="label">总Token</div><div class="value">'+sm.totalTokens.toLocaleString()+'</div></div>'+
-
-'<div class="stat-card"><div class="label">输入Token</div><div class="value blue">'+sm.totalPrompt.toLocaleString()+'</div></div>'+
-
-'<div class="stat-card"><div class="label">输出Token</div><div class="value amber">'+sm.totalCompletion.toLocaleString()+'</div></div>'+
-
-'<div class="stat-card"><div class="label">缓存命中率</div><div class="value green">'+(sm.cacheHitRate*100).toFixed(1)+'%</div></div>';
-
-var keys=s.keys||[];
-
-$('auditKeyWrap').innerHTML=keys.length?'<table><thead><tr><th>Key名称</th><th>Key</th><th>请求数</th><th>Token</th><th>最后使用</th></tr></thead><tbody>'+keys.map(function(k){return '<tr><td>'+esc(k.name)+'</td><td><code>'+esc(k.key)+'</code></td><td>'+k.requests.toLocaleString()+'</td><td>'+k.totalTokens.toLocaleString()+'</td><td>'+(k.lastUsedAt?new Date(k.lastUsedAt).toLocaleString():'从未')+'</td></tr>'}).join('')+'</tbody></table>':'<div style="padding:16px;color:var(--muted)">暂无数据</div>';
-
-var models=s.models||[];
-
-$('auditModelWrap').innerHTML=models.length?'<table><thead><tr><th>模型</th><th>请求数</th><th>输入</th><th>输出</th><th>总Token</th><th>缓存</th></tr></thead><tbody>'+models.map(function(m){return '<tr><td><code>'+esc(m.model)+'</code></td><td>'+m.requests.toLocaleString()+'</td><td>'+m.promptTokens.toLocaleString()+'</td><td>'+m.completionTokens.toLocaleString()+'</td><td>'+m.totalTokens.toLocaleString()+'</td><td>'+(m.cacheRead||0).toLocaleString()+'</td></tr>'}).join('')+'</tbody></table>':'<div style="padding:16px;color:var(--muted)">暂无数据</div>';
-
-var days=s.days||[];
-
-$('auditDayWrap').innerHTML=days.length?'<table><thead><tr><th>日期</th><th>请求数</th><th>总Token</th><th>输入</th><th>输出</th><th>缓存</th><th>详情</th></tr></thead><tbody>'+days.map(function(d){return '<tr><td>'+esc(d.date)+'</td><td>'+d.requests.toLocaleString()+'</td><td>'+d.totalTokens.toLocaleString()+'</td><td>'+d.promptTokens.toLocaleString()+'</td><td>'+d.completionTokens.toLocaleString()+'</td><td>'+(d.cacheRead||0).toLocaleString()+'</td><td><button class="btn btn-outline btn-sm" onclick="showAuditDetail(\''+esc(d.date)+'\')">详情</button></td></tr>'}).join('')+'</tbody></table>':'<div style="padding:16px;color:var(--muted)">暂无数据</div>';
-
-}catch(e){$('auditSummary').innerHTML='<div class="stat-card" style="color:var(--red)">加载失败: '+esc(e.message)+'</div>'}
-
+async function fetchAudit() {
+  try {
+    const s = await api('/api/audit');
+    const sum = s.summary || {};
+    const ac = $('auditCards');
+    if(ac) ac.innerHTML = statCard('bar_chart','总请求', sum.totalRequests||0, null, 'primary') + statCard('token','总 Token', sum.totalTokens||0, null, 'success') + statCard('data_usage','Prompt', sum.totalPrompt||0, 'Completion: '+(sum.totalCompletion||0), 'info') + `<div class="bg-surface rounded-xl border border-border p-5 ambient-shadow hover:shadow-md hover:border-primary/30 transition-all"><div class="flex items-center gap-3 mb-2"><div class="w-9 h-9 rounded-full bg-warning/10 text-warning flex items-center justify-center"><span class="material-symbols-outlined text-lg">cached</span></div><span class="text-label-md text-secondary">缓存命中率</span></div><div class="flex items-end gap-1 mt-2"><span class="text-display-lg text-on-surface font-bold tracking-tight">${(sum.cacheHitRate||0)*100}</span><span class="text-title-md text-secondary mb-1">%</span></div></div>`;
+    const at = $('auditTable');
+    if(at) {
+      const days = s.days || [];
+      if(days.length) {
+        at.innerHTML = renderTable(['日期','请求数','Token','Prompt','Completion','缓存读取'], days.map(d => statRow([d.date||'-', d.requests||0, d.totalTokens||0, d.promptTokens||0, d.completionTokens||0, d.cacheRead||0])));
+      } else {
+        at.innerHTML = `<div class="text-center py-12"><span class="material-symbols-outlined text-5xl text-secondary/30 block mb-3">bar_chart</span><p class="text-body-md text-secondary">暂无调用记录</p></div>`;
+      }
+    }
+  } catch(e) { const ac = $('auditCards'); if(ac) ac.innerHTML = skeletonCards(4); }
 }
-
-function showAuditDetail(date){$('auditDate').value=date;fetchAuditDetail()}
-
-async function fetchAuditDetail(){
-
-var date=$('auditDate').value;if(!date){$('auditDetailWrap').innerHTML='<div style="padding:16px;color:var(--muted)">请选择日期</div>';return}
-
-try{var s=await api('/api/audit/daily?date='+encodeURIComponent(date));
-
-var entries=s.entries||[];
-
-$('auditDetailWrap').innerHTML=entries.length?'<table><thead><tr><th>时间</th><th>模型</th><th>输入</th><th>输出</th><th>总Token</th><th>缓存</th><th>延时</th><th>状态</th></tr></thead><tbody>'+entries.map(function(e){var sc=e.status==='success'?'green':'red';return '<tr><td>'+esc(e.time)+'</td><td><code>'+esc(e.model)+'</code></td><td>'+e.promptTokens.toLocaleString()+'</td><td>'+e.completionTokens.toLocaleString()+'</td><td>'+e.totalTokens.toLocaleString()+'</td><td>'+(e.cacheRead||0).toLocaleString()+'</td><td>'+(e.latencyMs||0)+'ms</td><td><span class="tag tag-'+sc+'">'+esc(e.status)+'</span></td></tr>'}).join('')+'</tbody></table>':'<div style="padding:16px;color:var(--muted)">该日无数据</div>';
-
-}catch(e){$('auditDetailWrap').innerHTML='<div style="padding:16px;color:var(--red)">加载失败: '+esc(e.message)+'</div>'}
-
-}
-
-
 
 /* ===== KEYS ===== */
-
-async function fetchKeys(){
-
-startRefresh('keys',fetchKeys,15000);
-
-try{var s=await api('/api/keys');var k=s.keys||[];var now=Date.now();
-
-$('keyTableWrap').innerHTML=k.length?'<table><thead><tr><th>名称</th><th>Key</th><th>状态</th><th>并发</th><th>已用/限额</th><th>Token</th><th>到期</th><th>操作</th></tr></thead><tbody>'+k.map(function(x){
-
-var isDefault=x.name==='默认';
-
-var exp=x.expiresAt?new Date(x.expiresAt).getTime():0;
-
-var st=x.enabled===false?'disabled':(exp&&exp<now)?'expired':'active';
-
-var stLabel={active:'active',disabled:'disabled',expired:'expired'}[st];
-
-var conc=x.maxConcurrency?x.currentConcurrency+'/'+x.maxConcurrency:'∞';
-
-var req=x.maxRequests?x.requestCount+'/'+x.maxRequests:(x.requestCount||0).toString();
-
-var expStr=x.expiresAt?new Date(x.expiresAt).toLocaleDateString():'永不过期';
-
-var acts='<button class="btn btn-outline btn-sm" onclick="showEditKey(\''+esc(x.key)+'\')" title="编辑">✏️</button> ';
-
-acts+='<button class="btn btn-outline btn-sm" onclick="copyKey(\''+esc(x.key||'')+'\')" title="复制">📋</button> ';
-
-if(!isDefault){acts+='<button class="btn btn-outline btn-sm" onclick="toggleKey(\''+esc(x.key)+'\','+(x.enabled!==false)+')" title="'+(x.enabled!==false?'禁用':'启用')+'">'+(x.enabled!==false?'🔒':'🔓')+'</button> '}
-
-if(!isDefault){acts+='<button class="btn btn-red btn-sm" onclick="deleteKey(\''+esc(x.key)+'\')" title="删除">🗑️</button>'}
-
-return '<tr><td>'+esc(x.name||'未命名')+'</td><td><code>'+esc((x.key||'').slice(0,4))+'****</code></td><td><span class="tag tag-'+stLabel+'">'+{active:'active',disabled:'disabled',expired:'expired'}[st]+'</span></td><td>'+conc+'</td><td>'+req+'</td><td>'+(x.totalTokens||0).toLocaleString()+'</td><td>'+expStr+'</td><td style="white-space:nowrap">'+acts+'</td></tr>'
-
-}).join('')+'</tbody></table>':'<div style="padding:16px;color:var(--muted)">暂无密钥</div>';
-
-var sel=$('testKeySelect');if(sel){var cur=sel.value;var enabled=k.filter(function(x){return x.enabled!==false});sel.innerHTML=enabled.length?enabled.map(function(x,i){return '<option value="'+esc(x.fullKey||x.key)+'">'+esc(x.name||x.key.slice(0,8))+'</option>'}).join(''):'<option value="">无可用密钥</option>';sel.value=cur}
-
-}catch(e){$('keyTableWrap').innerHTML='<div style="padding:16px;color:var(--red)">加载失败: '+esc(e.message)+'</div>'}
-
+let allKeys = [];
+async function fetchKeys() {
+  try { const s = await api('/api/keys'); allKeys = s.keys || []; renderKeys(allKeys); }
+  catch(e) { const kc = $('keyCards'); if(kc) kc.innerHTML = skeletonCards(4); }
+}
+function filterKeys() {
+  const q = ($('keySearch')||{}).value||'';
+  const f = allKeys.filter(k => (k.name||'').toLowerCase().includes(q)||(k.key||'').toLowerCase().includes(q)||(k.fullKey||'').toLowerCase().includes(q));
+  renderKeys(f, q);
+}
+function renderKeys(keys, q) {
+  const total = keys.length, enabled = keys.filter(k => k.enabled!==false).length, disabled = total - enabled;
+  const expired = keys.filter(k => k.expiresAt>0&&k.expiresAt<Date.now()).length;
+  const kc = $('keyCards');
+  if(kc) kc.innerHTML = statCard('vpn_key','密钥总数', total, null, 'primary') + statCard('check_circle','已启用', enabled, null, 'success') + statCard('block','已禁用', disabled, null, 'red') + statCard('schedule','已过期', expired, null, 'warning');
+  const kt = $('keyTable'); if(!kt) return;
+  kt.innerHTML = renderTable(['Key','名称','状态','并发','总请求','总 Token','到期时间','操作'],
+    keys.map(k => {
+      const isExpired = k.expiresAt>0&&k.expiresAt<Date.now();
+      const status = isExpired?'expired':(k.enabled!==false?'active':'disabled');
+      const statusLabel = isExpired?'已过期':(k.enabled!==false?'已启用':'已禁用');
+      return statRow([
+        `<code class="text-mono-md px-1.5 py-0.5 bg-surface-container-high rounded">${esc(k.fullKey||k.key)}</code>`, esc(k.name||'-'), badge(statusLabel, status), k.maxConcurrency||'-', k.totalRequests||0, k.totalTokens||0,
+        k.expiresAt?new Date(k.expiresAt).toLocaleString('zh-CN'):'永不',
+        `<div class="flex gap-1"><button onclick="editKey('${k.key}')" class="flex items-center justify-center w-8 h-8 rounded-2xl text-secondary hover:bg-surface-container-high hover:text-primary transition-colors cursor-pointer"><span class="material-symbols-outlined text-[18px]">edit</span></button>`+
+        `<button onclick="toggleKey('${k.key}')" class="flex items-center justify-center w-8 h-8 rounded-2xl text-secondary hover:bg-surface-container-high ${k.enabled!==false?'hover:text-warning':'hover:text-success'} transition-colors cursor-pointer"><span class="material-symbols-outlined text-[18px]">${k.enabled!==false?'pause':'play_arrow'}</span></button>`+
+        `<button onclick="deleteKey('${k.key}')" class="flex items-center justify-center w-8 h-8 rounded-2xl text-secondary hover:bg-surface-container-high hover:text-error transition-colors cursor-pointer"><span class="material-symbols-outlined text-[18px]">delete</span></button></div>`
+      ]);
+    }), q?'未找到匹配「'+esc(q)+'」的密钥':'暂无密钥，点击上方「创建密钥」添加'
+  );
 }
 
-function showAddKey(){
-
-$('modal').innerHTML='<div class="modal-overlay" onclick="if(event.target===this)closeModal()"><div class="modal"><h2>➕ 创建密钥</h2><div class="form-group"><label>名称</label><input id="mkName" placeholder="my-key"></div><div class="form-group"><label>最大并发 (0=不限)</label><input id="mkConc" type="number" value="0"></div><div class="form-group"><label>最大请求数 (0=不限)</label><input id="mkReq" type="number" value="0"></div><div class="form-group"><label>到期日期 (留空=永不过期)</label><input id="mkExp" type="date"></div><div style="display:flex;gap:8px;margin-top:14px"><button class="btn btn-primary" onclick="createKey()">创建</button><button class="btn btn-outline" onclick="closeModal()">取消</button></div></div></div>';
-
+function showCreateKey() {
+  showModal(`<h3 class="text-headline-sm font-bold text-on-surface mb-5 flex items-center gap-2"><span class="material-symbols-outlined text-primary">add_circle</span> 创建新密钥</h3>
+    <div class="space-y-4">
+      <div><label class="text-label-md text-secondary block mb-1.5">名称</label><input id="newKeyName" class="w-full px-3 py-2 bg-surface-container-low border border-border rounded-2xl text-body-md focus:border-primary focus:ring-2 focus:ring-primary/20 transition-all outline-none" placeholder="例如：开发环境密钥"/></div>
+      <div><label class="text-label-md text-secondary block mb-1.5">并发限制</label><input id="newKeyConcurrency" class="w-full px-3 py-2 bg-surface-container-low border border-border rounded-2xl text-body-md focus:border-primary focus:ring-2 focus:ring-primary/20 transition-all outline-none" type="number" value="3"/></div>
+      <div><label class="text-label-md text-secondary block mb-1.5">最大请求数</label><input id="newKeyMaxReqs" class="w-full px-3 py-2 bg-surface-container-low border border-border rounded-2xl text-body-md focus:border-primary focus:ring-2 focus:ring-primary/20 transition-all outline-none" type="number" placeholder="0 表示不限"/></div>
+      <div><label class="text-label-md text-secondary block mb-1.5">过期时间</label><input id="newKeyExpires" class="w-full px-3 py-2 bg-surface-container-low border border-border rounded-2xl text-body-md focus:border-primary focus:ring-2 focus:ring-primary/20 transition-all outline-none" type="datetime-local"/></div>
+    </div>
+    <div class="flex gap-3 mt-6">
+      <button onclick="createKey()" class="flex-1 flex items-center justify-center gap-2 bg-primary text-on-primary px-4 py-2.5 rounded-2xl text-label-md hover:bg-primary-container transition-colors shadow-sm active:scale-[0.98] cursor-pointer"><span class="material-symbols-outlined text-lg">add</span> 创建</button>
+      <button onclick="closeModal()" class="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-surface border border-border text-secondary rounded-2xl text-label-md hover:border-primary hover:text-primary transition-colors cursor-pointer">取消</button>
+    </div>`);
 }
-
-async function createKey(){
-
-var name=$('mkName').value||'未命名';
-
-var conc=parseInt($('mkConc').value)||0;
-
-var req=parseInt($('mkReq').value)||0;
-
-var exp=$('mkExp').value||undefined;
-
-try{var r=await api('/api/keys','POST',{name:name,maxConcurrency:conc,maxRequests:req,expiresAt:exp});
-
-closeModal();
-
-var newKey=r.key||'';
-
-$('modal').innerHTML='<div class="modal-overlay" onclick="if(event.target===this)closeModal()"><div class="modal"><h2>✅ 密钥已创建</h2><div style="background:var(--bg);padding:12px;border-radius:8px;font-family:monospace;font-size:13px;word-break:break-all;margin-bottom:10px">'+esc(newKey)+'</div><div style="color:var(--amber);font-size:12px;margin-bottom:14px">⚠️ 关闭此弹窗后无法再查看完整 Key，请立即复制！</div><div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="copyKey(\''+esc(newKey)+'\')">📋 复制 Key</button><button class="btn btn-outline" onclick="closeModal()">关闭</button></div></div></div>';
-
-toast('密钥已创建','ok');fetchKeys();
-
-}catch(e){toast(e.message)}
-
+async function createKey() {
+  const name = ($('newKeyName')||{}).value||'';
+  const concurrency = parseInt(($('newKeyConcurrency')||{}).value)||3;
+  const maxReqs = ($('newKeyMaxReqs')||{}).value ? parseInt($('newKeyMaxReqs').value) : 0;
+  const expires = ($('newKeyExpires')||{}).value ? new Date($('newKeyExpires').value).getTime() : 0;
+  try { await api('/api/keys','POST',{name, maxConcurrency:concurrency, maxRequests:maxReqs, expiresAt:expires}); toast('密钥创建成功','ok'); closeModal(); fetchKeys(); }
+  catch(e) { toast('创建失败: '+e.message,'err'); }
 }
-
-async function toggleKey(key,wasEnabled){
-
-if(wasEnabled&&!confirm('确定禁用该密钥？正在使用该 Key 的请求将被中断'))return;
-
-try{await api('/api/keys/'+encodeURIComponent(key),'PUT',{enabled:!wasEnabled});toast('已更新','ok');fetchKeys()}catch(e){toast(e.message)}
-
+function editKey(keyId) {
+  const k = allKeys.find(x => x.key === keyId); if(!k) return;
+  showModal(`<h3 class="text-headline-sm font-bold text-on-surface mb-5 flex items-center gap-2"><span class="material-symbols-outlined text-primary">edit</span> 编辑密钥</h3>
+    <div class="space-y-4">
+      <div><label class="text-label-md text-secondary block mb-1.5">Key</label><code class="block px-3 py-2 bg-surface-container-low border border-border rounded-2xl text-mono-md">${esc(k.fullKey||k.key)}</code></div>
+      <div><label class="text-label-md text-secondary block mb-1.5">名称</label><input id="editKeyName" class="w-full px-3 py-2 bg-surface-container-low border border-border rounded-2xl text-body-md focus:border-primary focus:ring-2 focus:ring-primary/20 transition-all outline-none" value="${esc(k.name||'')}"/></div>
+      <div><label class="flex items-center gap-2 cursor-pointer"><input id="editKeyEnabled" type="checkbox" class="w-4 h-4 rounded border-border text-primary focus:ring-primary/20" ${k.enabled!==false?'checked':''}/><span class="text-body-md text-secondary">启用此密钥</span></label></div>
+      <div><label class="text-label-md text-secondary block mb-1.5">并发限制</label><input id="editKeyConcurrency" class="w-full px-3 py-2 bg-surface-container-low border border-border rounded-2xl text-body-md focus:border-primary focus:ring-2 focus:ring-primary/20 transition-all outline-none" type="number" value="${k.maxConcurrency||3}"/></div>
+      <div><label class="text-label-md text-secondary block mb-1.5">最大请求数</label><input id="editKeyMaxReqs" class="w-full px-3 py-2 bg-surface-container-low border border-border rounded-2xl text-body-md focus:border-primary focus:ring-2 focus:ring-primary/20 transition-all outline-none" type="number" value="${k.maxRequests||0}" placeholder="0 表示不限"/></div>
+    </div>
+    <div class="flex gap-3 mt-6">
+      <button onclick="doEditKey('${keyId}')" class="flex-1 flex items-center justify-center gap-2 bg-primary text-on-primary px-4 py-2.5 rounded-2xl text-label-md hover:bg-primary-container transition-colors shadow-sm active:scale-[0.98] cursor-pointer"><span class="material-symbols-outlined text-lg">save</span> 保存</button>
+      <button onclick="closeModal()" class="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-surface border border-border text-secondary rounded-2xl text-label-md hover:border-primary hover:text-primary transition-colors cursor-pointer">取消</button>
+    </div>`);
 }
-
-async function deleteKey(key){if(!confirm('确定要删除这个密钥吗？'))return;try{await api('/api/keys/'+encodeURIComponent(key),'DELETE');toast('密钥已删除','ok');fetchKeys()}catch(e){toast(e.message)}}
-
-async function copyKey(key){try{await navigator.clipboard.writeText(key);toast('已复制','ok')}catch(e){toast('复制失败: '+e.message)}}
-
-function showEditKey(key){
-
-api('/api/keys').then(function(s){var x=(s.keys||[]).find(function(k){return k.key===key});if(!x)return toast('找不到密钥');
-
-var exp=x.expiresAt?new Date(x.expiresAt).toISOString().split('T')[0]:'';
-
-$('modal').innerHTML='<div class="modal-overlay" onclick="if(event.target===this)closeModal()"><div class="modal"><h2>✏️ 编辑密钥</h2><div class="form-group"><label>名称</label><input id="ekName" value="'+esc(x.name||'')+'"></div><div class="form-group"><label>启用</label><select id="ekEnabled"><option value="true"'+(x.enabled!==false?' selected':'')+'>是</option><option value="false"'+(x.enabled===false?' selected':'')+'>否</option></select></div><div class="form-group"><label>最大并发 (0=不限)</label><input id="ekConc" type="number" value="'+(x.maxConcurrency||0)+'"></div><div class="form-group"><label>最大请求数 (0=不限)</label><input id="ekReq" type="number" value="'+(x.maxRequests||0)+'"></div><div class="form-group"><label>到期日期 (留空=永不过期)</label><input id="ekExp" type="date" value="'+exp+'"></div><div style="display:flex;gap:8px;margin-top:14px"><button class="btn btn-primary" onclick="updateKey(\''+esc(key)+'\')">保存</button><button class="btn btn-outline btn-sm" onclick="resetReqCount(\''+esc(key)+'\')">🔄 重置调用次数</button><button class="btn btn-outline" onclick="closeModal()">取消</button></div></div></div>';
-
-}).catch(function(e){toast(e.message)});
-
+async function doEditKey(keyId) {
+  const name = ($('editKeyName')||{}).value||'';
+  const enabled = ($('editKeyEnabled')||{}).checked !== false;
+  const concurrency = parseInt(($('editKeyConcurrency')||{}).value)||3;
+  const maxReqs = ($('editKeyMaxReqs')||{}).value ? parseInt($('editKeyMaxReqs').value) : 0;
+  try { await api('/api/keys/'+keyId,'PUT',{name, enabled, maxConcurrency:concurrency, maxRequests:maxReqs}); toast('密钥更新成功','ok'); closeModal(); fetchKeys(); }
+  catch(e) { toast('更新失败: '+e.message,'err'); }
 }
-
-async function resetReqCount(key){
-
-if(!confirm('确定重置该密钥的调用次数？'))return;
-
-try{await api('/api/keys/'+encodeURIComponent(key),'PUT',{resetRequestCount:true});toast('调用次数已重置','ok');showEditKey(key);fetchKeys()}catch(e){toast(e.message)}
-
+async function toggleKey(keyId) {
+  try {
+    const k = allKeys.find(x => x.key === keyId);
+    await api('/api/keys/'+keyId,'PUT',{enabled: !k || k.enabled === false});
+    toast('密钥状态已切换','ok'); fetchKeys();
+  } catch(e) { toast('操作失败: '+e.message,'err'); }
 }
-
-async function updateKey(key){
-
-var name=$('ekName').value;var enabled=$('ekEnabled').value==='true';
-
-var conc=parseInt($('ekConc').value)||0;var req=parseInt($('ekReq').value)||0;
-
-var exp=$('ekExp')?$('ekExp').value||undefined:undefined;
-
-try{await api('/api/keys/'+encodeURIComponent(key),'PUT',{name:name,enabled:enabled,maxConcurrency:conc,maxRequests:req,expiresAt:exp});closeModal();toast('已更新','ok');fetchKeys()}catch(e){toast(e.message)}
-
+async function deleteKey(keyId) {
+  if(!confirm('确定删除此密钥？不可撤销。')) return;
+  try { await api('/api/keys/'+keyId,'DELETE'); toast('密钥已删除','ok'); fetchKeys(); }
+  catch(e) { toast('删除失败: '+e.message,'err'); }
 }
-
-
 
 /* ===== PROXIES ===== */
-
-var _proxiesPageSize=50;
-
-var _proxiesAll=[];
-
-var _proxiesPage=1;
-
-function _proxyRenderPage(){
-
-var p=_proxiesAll;
-
-var totalPages=Math.ceil(p.length/_proxiesPageSize)||1;
-
-if(_proxiesPage>totalPages)_proxiesPage=totalPages;
-
-if(_proxiesPage<1)_proxiesPage=1;
-
-var start=(_proxiesPage-1)*_proxiesPageSize;
-
-var end=Math.min(start+_proxiesPageSize,p.length);
-
-var page=p.slice(start,end);
-
-var gradeColors={A:'green',B:'blue',C:'amber',D:'red',F:'red'};
-
-var html='';
-
-if(p.length){
-
-html+='<table><thead><tr><th>地址</th><th>协议</th><th>等级</th><th>延时</th><th>状态</th><th>操作</th></tr></thead><tbody>';
-
-html+=page.map(function(x){
-
-var gc=gradeColors[x.quality_grade]||'muted';
-
-var acts='<button class="btn btn-red btn-sm" onclick="delProxy(\''+esc(x.address)+'\')">🗑️</button>';
-
-if(!x.active)acts+=' <button class="btn btn-green btn-sm" onclick="promoteProxy(\''+esc(x.address)+'\')">⬆️</button>';
-
-return '<tr><td><code>'+esc(x.address)+'</code></td><td>'+esc(x.protocol||'http')+'</td><td><span class="tag tag-'+gc+'">'+esc(x.quality_grade||'-')+'</span></td><td>'+(x.latency?x.latency+'ms':'-')+'</td><td><span class="tag tag-'+(x.active?'active':'pending')+'">'+(x.active?'活跃':'空闲')+'</span></td><td>'+acts+'</td></tr>'
-
-}).join('')+'</tbody></table>';
-
-if(totalPages>1){
-
-html+='<div style="display:flex;align-items:center;gap:8px;padding:12px 0;justify-content:center;font-size:13px">';
-
-html+='<button class="btn btn-outline btn-sm" onclick="_proxiesPage=1;_proxyRenderPage()" '+(_proxiesPage<=1?'disabled':'')+'>«</button>';
-
-html+='<button class="btn btn-outline btn-sm" onclick="_proxiesPage=Math.max(1,_proxiesPage-1);_proxyRenderPage()" '+(_proxiesPage<=1?'disabled':'')+'>‹</button>';
-
-html+='<span style="margin:0 8px;color:var(--muted)">第 '+_proxiesPage+'/'+totalPages+' 页（共 '+p.length+' 条）</span>';
-
-html+='<button class="btn btn-outline btn-sm" onclick="_proxiesPage=Math.min(totalPages,_proxiesPage+1);_proxyRenderPage()" '+(_proxiesPage>=totalPages?'disabled':'')+'>›</button>';
-
-html+='<button class="btn btn-outline btn-sm" onclick="_proxiesPage=totalPages;_proxyRenderPage()" '+(_proxiesPage>=totalPages?'disabled':'')+'>»</button>';
-
-html+='</div>';
-
+async function fetchProxies() {
+  startRefresh('proxies', fetchProxies, 15000);
+  try {
+    const s = await api('/api/proxies');
+    const list = s.proxies || [];
+    const pc = $('proxyCards');
+    if(pc) pc.innerHTML = statCard('router','代理总数', s.count||0, null, 'primary') + statCard('check_circle','已锁定', list.filter(x=>x.lockedBy).length||0, null, 'success') + statCard('error','空闲', list.filter(x=>!x.lockedBy).length||0, null, 'info') + statCard('electrical_services','备用池', s.releasedCount||0, null, 'warning');
+    const pt = $('proxyTable');
+    if(pt) {
+      if(list.length) {
+        pt.innerHTML = renderTable(['地址','协议','质量','延迟','状态','操作'],
+          list.slice(0,100).map(p => statRow([
+            `<code class="text-mono-md">${esc(p.address)}</code>`, esc(p.protocol||'http'),
+            badge(p.quality_grade||'C', p.quality_grade==='S'?'green':p.quality_grade==='A'?'blue':'gray'),
+            (p.latency||'-')+'ms', p.lockedBy ? badge('已锁定','active') : badge('空闲','gray'),
+            `<button onclick="promoteProxy('${esc(p.address)}')" class="flex items-center justify-center w-8 h-8 rounded-2xl text-secondary hover:bg-surface-container-high hover:text-primary transition-colors cursor-pointer" title="提升优先级"><span class="material-symbols-outlined text-[18px]">arrow_upward</span></button>`
+          ]))
+        );
+      } else {
+        pt.innerHTML = `<div class="text-center py-12"><span class="material-symbols-outlined text-5xl text-secondary/30 block mb-3">router</span><p class="text-body-md text-secondary">暂无代理数据</p></div>`;
+      }
+    }
+  } catch(e) { const pc = $('proxyCards'); if(pc) pc.innerHTML = skeletonCards(4); }
+}
+async function promoteProxy(addr) {
+  try { await api('/api/promote','POST',{addr}); toast('代理已提升优先级','ok'); fetchProxies(); }
+  catch(e) { toast('操作失败: '+e.message,'err'); }
 }
 
-}else{
-
-html='<div style="padding:16px;color:var(--muted)">暂无代理</div>';
-
+function showImportProxies() {
+  showModal(`<h3 class="text-headline-sm font-bold text-on-surface mb-5 flex items-center gap-2"><span class="material-symbols-outlined text-primary">playlist_add</span> 批量导入代理</h3>
+    <p class="text-body-md text-secondary mb-4">每行一个代理地址，支持格式：<code class="text-mono-md bg-surface-container-low px-2 py-0.5 rounded-lg">http://host:port</code> <code class="text-mono-md bg-surface-container-low px-2 py-0.5 rounded-lg">socks5://host:port</code></p>
+    <textarea id="importProxyText" class="w-full h-44 px-3 py-2 bg-surface-container-low border border-border rounded-2xl text-mono-md focus:border-primary focus:ring-2 focus:ring-primary/20 transition-all outline-none resize-y" placeholder="socks5://1.2.3.4:1080&#10;http://5.6.7.8:3128&#10;socks5://9.10.11.12:1080"></textarea>
+    <p id="importProxyStatus" class="text-label-md text-secondary mt-2 hidden"></p>
+    <div class="flex gap-3 mt-5">
+      <button onclick="importProxies()" id="importProxyBtn" class="flex-1 flex items-center justify-center gap-2 bg-primary text-on-primary px-4 py-2.5 rounded-2xl text-label-md hover:bg-primary-container transition-colors shadow-sm cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"><span class="material-symbols-outlined text-lg">upload</span> 导入</button>
+      <button onclick="closeModal()" class="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-surface border border-border text-secondary rounded-2xl text-label-md hover:border-primary hover:text-primary transition-colors cursor-pointer">取消</button>
+    </div>`);
 }
 
-$('proxyTableWrap').innerHTML=html;
-
+async function importProxies() {
+  const btn = $('importProxyBtn');
+  const ta = $('importProxyText');
+  const st = $('importProxyStatus');
+  if (!btn || !ta) return;
+  const lines = ta.value.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'));
+  if (!lines.length) { toast('请输入代理地址','err'); return; }
+  btn.disabled = true;
+  btn.innerHTML = '<span class="material-symbols-outlined text-lg animate-spin">sync</span> 导入中...';
+  if (st) { st.className = 'text-label-md text-secondary mt-2'; st.textContent = ''; }
+  try {
+    // 分批导入，每批 50 个
+    const batchSize = 50;
+    let total = 0;
+    for (let i = 0; i < lines.length; i += batchSize) {
+      const batch = lines.slice(i, i + batchSize);
+      const r = await api('/api/proxies', 'POST', { proxies: batch });
+      total += r.count || 0;
+      if (st) st.textContent = `进度: ${Math.min(i+batchSize, lines.length)}/${lines.length} (已添加 ${total} 个)`;
+    }
+    if (st) st.className = 'text-label-md text-success mt-2';
+    toast(`导入完成: 共 ${total} 个代理已添加`,'ok');
+    closeModal();
+    fetchProxies();
+  } catch(e) {
+    toast('导入失败: '+e.message,'err');
+    if (st) { st.className = 'text-label-md text-error mt-2'; st.textContent = '失败: '+e.message; }
+  }
+  btn.disabled = false;
+  btn.innerHTML = '<span class="material-symbols-outlined text-lg">upload</span> 导入';
 }
-
-async function fetchProxies(){
-
-startRefresh('proxies',fetchProxies,10000);
-
-try{var s=await api('/api/proxies');_proxiesAll=s.proxies||[];_proxiesPage=1;_proxyRenderPage()}catch(e){$('proxyTableWrap').innerHTML='<div style="padding:16px;color:var(--red)">加载失败: '+esc(e.message)+'</div>'}
-
-}
-
-async function delProxy(addr){if(!confirm('确定删除代理 '+addr+'？'))return;try{await api('/api/proxies/'+encodeURIComponent(addr),'DELETE');toast('已删除','ok');fetchProxies()}catch(e){toast(e.message)}}
-
-async function promoteProxy(addr){try{await api('/api/promote','POST',{addr:addr});toast('已提升','ok');fetchProxies()}catch(e){toast(e.message)}}
-
-function showAddProxy(){
-
-$('modal').innerHTML='<div class="modal-overlay" onclick="if(event.target===this)closeModal()"><div class="modal"><h2>➕ 批量添加代理</h2><div class="form-group"><label>代理列表 (每行一个)</label><textarea id="proxyList" rows="8" placeholder="http://ip:port&#10;socks5://ip:port"></textarea></div><div style="display:flex;gap:8px;margin-top:14px"><button class="btn btn-primary" onclick="addProxies()">添加</button><button class="btn btn-outline" onclick="closeModal()">取消</button></div></div></div>';
-
-}
-
-async function addProxies(){
-
-var text=$('proxyList').value.trim();if(!text){toast('请输入代理');return}
-
-var list=text.split('\n').map(function(l){return l.trim()}).filter(Boolean);
-
-if(!confirm('将添加 '+list.length+' 个代理，确定继续？'))return;
-
-try{await api('/api/proxies','POST',{proxies:list});closeModal();toast('已添加 '+list.length+' 个代理','ok');fetchProxies()}catch(e){toast(e.message)}
-
-}
-
-
 
 /* ===== SOURCES ===== */
-
-async function fetchSources(){
-
-startRefresh('sources',fetchSources,30000);
-
-try{var s=await api('/api/sources');var sr=s.sources||[];
-
-$('sourceTableWrap').innerHTML=sr.length?'<table><thead><tr><th>名称</th><th>类型</th><th>状态</th><th>操作</th></tr></thead><tbody>'+sr.map(function(x){
-
-var stat=x.error?'<span class="tag tag-expired">'+esc(x.error)+'</span>':'<span class="tag tag-active">'+x.count+' 条</span>';
-
-return '<tr><td>'+esc(x.name)+'</td><td>'+esc(x.type)+'</td><td>'+stat+'</td><td><button class="btn btn-red btn-sm" onclick="delSource(\''+esc(x.name)+'\')">🗑️</button></td></tr>'
-
-}).join('')+'</tbody></table>':'<div style="padding:16px;color:var(--muted)">暂无数据源</div>';
-
-}catch(e){$('sourceTableWrap').innerHTML='<div style="padding:16px;color:var(--red)">加载失败: '+esc(e.message)+'</div>'}
-
+async function fetchSources() {
+  startRefresh('sources', fetchSources, 15000);
+  try {
+    const s = await api('/api/sources');
+    const list = s.sources || [];
+    const st = $('sourceTable');
+    if(!st) return;
+    if(list.length) {
+      st.innerHTML = renderTable(['名称','类型','代理数','状态','操作'],
+        list.map(src => statRow([
+          esc(src.name||''),
+          esc(src.type||'scraper'),
+          src.count||0,
+          src.error ? badge('异常','red') : badge('正常','green'),
+          `<button onclick="deleteSource('${esc(src.name)}')" class="flex items-center justify-center w-8 h-8 rounded-2xl text-secondary hover:bg-error/10 hover:text-error transition-colors cursor-pointer" title="删除"><span class="material-symbols-outlined text-[18px]">delete</span></button>`
+        ]))
+      );
+    } else {
+      st.innerHTML = `<div class="text-center py-12"><span class="material-symbols-outlined text-5xl text-secondary/30 block mb-3">source</span><p class="text-body-md text-secondary">暂无代理源，点击上方「添加源」开始</p></div>`;
+    }
+  } catch(e) { const st = $('sourceTable'); if(st) st.innerHTML = `<div class="text-center py-12"><p class="text-error">加载失败: ${esc(e.message)}</p></div>`; }
 }
 
-async function delSource(name){if(!confirm('确定删除源 '+name+'？'))return;try{await api('/api/sources/'+encodeURIComponent(name),'DELETE');toast('已删除','ok');fetchSources()}catch(e){toast(e.message)}}
-
-function showAddSource(){
-
-$('modal').innerHTML='<div class="modal-overlay" onclick="if(event.target===this)closeModal()"><div class="modal"><h2>➕ 添加代理源</h2><div class="form-group"><label>名称</label><input id="srcName" placeholder="my-source"></div><div class="form-group"><label>URL</label><input id="srcUrl" placeholder="https://..."></div><div class="form-group"><label>类型</label><select id="srcType"><option value="text" selected>text (txt)</option><option value="json">json</option></select></div><div style="display:flex;gap:8px;margin-top:14px"><button class="btn btn-primary" onclick="addSource()">添加</button><button class="btn btn-outline" onclick="closeModal()">取消</button></div></div></div>';
-
+function showAddSource() {
+  showModal(`<h3 class="text-headline-sm font-bold text-on-surface mb-5 flex items-center gap-2"><span class="material-symbols-outlined text-primary">add_circle</span> 添加代理源</h3>
+    <div class="space-y-4">
+      <div>
+        <label class="text-label-md text-secondary block mb-1.5" for="srcName">名称</label>
+        <input id="srcName" class="w-full px-3 py-2 bg-surface-container-low border border-border rounded-2xl text-body-md focus:border-primary focus:ring-2 focus:ring-primary/20 transition-all outline-none" placeholder="例如: my-proxy-source"/>
+      </div>
+      <div>
+        <label class="text-label-md text-secondary block mb-1.5" for="srcUrl">URL</label>
+        <input id="srcUrl" class="w-full px-3 py-2 bg-surface-container-low border border-border rounded-2xl text-body-md focus:border-primary focus:ring-2 focus:ring-primary/20 transition-all outline-none font-mono text-mono-md" placeholder="https://example.com/proxies.txt"/>
+      </div>
+      <div>
+        <label class="text-label-md text-secondary block mb-1.5" for="srcType">类型</label>
+        <select id="srcType" class="w-full px-3 py-2 bg-surface-container-low border border-border rounded-2xl text-body-md focus:border-primary focus:ring-2 focus:ring-primary/20 transition-all outline-none">
+          <option value="text">text（纯文本，每行一个）</option>
+          <option value="json">json（JSON 数组格式）</option>
+          <option value="scraper">scraper（页面抓取）</option>
+        </select>
+      </div>
+    </div>
+    <div class="flex gap-3 mt-6">
+      <button onclick="addSource()" id="addSrcBtn" class="flex-1 flex items-center justify-center gap-2 bg-primary text-on-primary px-4 py-2.5 rounded-2xl text-label-md hover:bg-primary-container transition-colors shadow-sm cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"><span class="material-symbols-outlined text-lg">add</span> 添加</button>
+      <button onclick="closeModal()" class="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-surface border border-border text-secondary rounded-2xl text-label-md hover:border-primary hover:text-primary transition-colors cursor-pointer">取消</button>
+    </div>`);
 }
 
-async function addSource(){
-
-var name=$('srcName').value,url=$('srcUrl').value,type=$('srcType').value;
-
-if(!name||!url){toast('请填写名称和URL');return}
-
-try{await api('/api/sources','POST',{name:name,url:url,type:type});closeModal();toast('已添加','ok');fetchSources()}catch(e){toast(e.message)}
-
+async function addSource() {
+  const btn = $('addSrcBtn');
+  const name = $('srcName')?.value.trim();
+  const url = $('srcUrl')?.value.trim();
+  const type = $('srcType')?.value || 'text';
+  if (!btn || !name || !url) { toast('名称和 URL 必填','err'); return; }
+  btn.disabled = true;
+  btn.innerHTML = '<span class="material-symbols-outlined text-lg animate-spin">sync</span> 添加中...';
+  try {
+    await api('/api/sources', 'POST', { name, url, type });
+    toast(`代理源 "${name}" 已添加`,'ok');
+    closeModal();
+    fetchSources();
+  } catch(e) {
+    toast('添加失败: '+e.message,'err');
+  }
+  btn.disabled = false;
+  btn.innerHTML = '<span class="material-symbols-outlined text-lg">add</span> 添加';
 }
 
-
+async function deleteSource(name) {
+  if (!confirm(`确定要删除代理源「${name}」吗？`)) return;
+  try {
+    await api('/api/sources/'+encodeURIComponent(name), 'DELETE');
+    toast(`代理源 "${name}" 已删除`,'ok');
+    fetchSources();
+  } catch(e) {
+    toast('删除失败: '+e.message,'err');
+  }
+}
 
 /* ===== CONFIG ===== */
-
-async function fetchConfig(){
-
-try{var c=await api('/api/config');
-
-$('configForm').innerHTML=
-
-'<div class="form-group"><label>槽位数量</label><input id="cfgSlots" type="number" value="'+(c.slotCount||10)+'"></div>'+
-
-'<div class="form-group"><label>WARP 模式</label><select id="cfgWarp"><option value="on"'+(c.warpMode==='on'?' selected':'')+'>on</option><option value="off"'+(c.warpMode==='off'?' selected':'')+'>off</option></select></div>'+
-
-'<div style="display:flex;gap:8px;margin-top:12px"><button class="btn btn-primary" onclick="saveConfig()">💾 保存配置</button><button class="btn btn-outline" onclick="reloadConfig()">🔄 热加载配置</button></div>';
-
-if($('cfgWarp')) $('cfgWarp').value=c.warpMode||'off';
-
-if($('fallbackProxyInput')) $('fallbackProxyInput').value=c.fallbackProxy||'';
-
-}catch(e){$('configForm').innerHTML='<div style="color:var(--red)">加载失败: '+esc(e.message)+'</div>'}
-
+async function fetchConfig() {
+  try {
+    const s = await api('/api/config');
+    const cfg = $('cfgPort'); if(cfg) cfg.value = s.port||'13339';
+    const cc = $('cfgConcurrency'); if(cc) cc.value = s.maxActiveKeys||20;
+    const cs = $('cfgSlotCount'); if(cs) cs.value = s.slotCount||3;
+    const cw = $('cfgWarpMode'); if(cw) cw.value = s.warpMode||'off';
+    const cf = $('cfgFallback'); if(cf) cf.value = s.fallbackProxy||'';
+    const cr = $('cfgRefreshMs'); if(cr) cr.value = s.proxyRefreshMs||300000;
+    toast('配置已加载','ok');
+  } catch(e) { toast('加载配置失败: '+e.message,'err'); }
 }
-
-async function reloadConfig(){try{var r=await api('/api/config/reload','POST');toast('已加载 '+r.candidates+' 候选, '+r.released+' 备用','ok');if(currentTab==='dashboard')fetchDashboard()}catch(e){toast(e.message)}}
-
-async function saveConfig(){
-
-var slotCount=parseInt($('cfgSlots').value)||10;
-
-var warpMode=$('cfgWarp').value;
-
-try{await api('/api/config','POST',{warpMode:warpMode,slotCount:slotCount});toast('配置已保存','ok');fetchConfig();if(currentTab==='dashboard')fetchDashboard()}catch(e){toast(e.message)}
-
+async function saveConfig() {
+  const btn = $('cfgSaveBtn');
+  if (!btn) return;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="material-symbols-outlined animate-spin text-[18px]">sync</span> 保存中...';
+  try {
+    const port = parseInt(($('cfgPort')||{}).value);
+    const maxActiveKeys = parseInt(($('cfgConcurrency')||{}).value);
+    const slotCount = parseInt(($('cfgSlotCount')||{}).value);
+    const refreshMs = parseInt(($('cfgRefreshMs')||{}).value);
+    const warpMode = ($('cfgWarpMode')||{}).value;
+    const fallback = ($('cfgFallback')||{}).value;
+    // 前端校验
+    const errors = [];
+    if (!port || port < 1 || port > 65535) errors.push('端口范围 1-65535');
+    if (!maxActiveKeys || maxActiveKeys < 1 || maxActiveKeys > 100) errors.push('Key 数范围 1-100');
+    if (!slotCount || slotCount < 1 || slotCount > 20) errors.push('槽位数范围 1-20');
+    if (!refreshMs || refreshMs < 5000 || refreshMs > 600000) errors.push('刷新间隔 5000-600000ms');
+    if (fallback && !/^socks5:\/\/.+/.test(fallback)) errors.push('Fallback 格式: socks5://host:port');
+    if (errors.length) {
+      toast('校验失败: ' + errors.join('; '), 'err');
+      btn.disabled = false;
+      btn.innerHTML = '<span class="material-symbols-outlined text-[18px]">save</span> 保存配置';
+      return;
+    }
+    const body = { port, maxActiveKeys, slotCount, warpMode, fallbackProxy: fallback, proxyRefreshMs: refreshMs };
+    await api('/api/config','POST', body);
+    toast('配置已保存','ok');
+    fetchConfig();
+  } catch(e) {
+    toast('保存失败: '+e.message,'err');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '<span class="material-symbols-outlined text-[18px]">save</span> 保存配置';
+  }
 }
-
-async function saveFallbackProxy(){
-
-var fb=$('fallbackProxyInput').value.trim();
-
-try{await api('/api/config','POST',{fallbackProxy:fb});toast('Fallback 代理已保存','ok');testFallbackProxy()}catch(e){toast(e.message)}
-
-}
-
-async function testFallbackProxy(){
-
-var fb=$('fallbackProxyInput').value.trim();
-
-if(!fb){$('fallbackTestResult').innerHTML='<span style="color:var(--red)">请先输入 Fallback 代理地址</span>';return}
-
-try{var r=await api('/api/fallback/test','POST',{address:fb});
-
-$('fallbackTestResult').innerHTML=r.ok?'<span style="color:var(--green)">✅ '+r.address+' 连通 ('+r.latencyMs+'ms)</span>':'<span style="color:var(--red)">❌ '+r.address+' 不可达</span>'}
-
-catch(e){$('fallbackTestResult').innerHTML='<span style="color:var(--red)">❌ 测试失败: '+esc(e.message)+'</span>'}
-
-}
-
-
 
 /* ===== LOGS ===== */
-
-async function fetchLogs(){
-
-startRefresh('logs',fetchLogs,10000);
-
-try{var s=await api('/api/logs');$('logBox').textContent=(s.logs||[]).join('\n')||'暂无日志';$('logBox').scrollTop=$('logBox').scrollHeight}catch(e){$('logBox').textContent='加载失败: '+e.message}
-
+async function fetchLogs() {
+  startRefresh('logs', fetchLogs, 10000);
+  try {
+    const s = await api('/api/logs');
+    const lb = $('logBox'); if(!lb) return;
+    lb.textContent = (s.logs||[]).join('\n')||'暂无日志';
+    lb.scrollTop = lb.scrollHeight;
+  } catch(e) { const lb = $('logBox'); if(lb) lb.textContent = '加载失败: '+e.message; }
 }
 
-
-
 /* ===== INIT ===== */
-
-fetchDashboard();
-
-fetchProxies();
-
-fetchSources();
-
+setTimeout(() => { fetchProxies(); fetchSources(); }, 200);

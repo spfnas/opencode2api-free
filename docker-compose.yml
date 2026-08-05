@@ -20,12 +20,17 @@ services:
     restart: always
     depends_on:
       - opencode-warp
+    volumes:
+      - /home/spfnas/opencode-gate/public:/app/public
+      - /home/spfnas/opencode-gate/data:/app/data
     environment:
       - PORT=13339
       - WARP_MODE=on
       - WARP_HOST=192.168.1.201
       - WARP_SOCKS5_PORT=1080
       - API_KEY=admin123
+      - FALLBACK_PROXY=socks5://proxy:Spf20081.@192.168.1.6:7779
+      - DATA_DIR=/app/data
     cap_add:
       - NET_ADMIN
     networks:
