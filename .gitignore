@@ -18,3 +18,4 @@ wgcf-profile.conf
 auth_matrix.js
 probe_upstream.js
 public\*
+backup_*/

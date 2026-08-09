@@ -35,6 +35,8 @@ interface Slot {
   proto: 'http' | 'socks5';
   latencyMs: number;
   qualityGrade: string;
+  cooldownUntil?: number;
+  consecutiveFails?: number;
 }
 
 interface KeySlotPool {
@@ -139,6 +141,7 @@ function loadSources() {
         name: s.name,
         url: s.url,
         type: srcType,
+        no_warp: !!s.no_warp,
         parser: def ? def.parser : (srcType === 'json' ? DEFAULT_SOURCES[0].parser : (data: string) => genericTextParser(data, s.protocol)),
       };
     });
@@ -305,10 +308,6 @@ const TCP_FAST_CHECK_TIMEOUT = parseInt(process.env.TCP_FAST_CHECK_TIMEOUT || '2
 const RELEASED_CANDIDATE_PROBE_INTERVAL = parseInt(process.env.RELEASED_CANDIDATE_PROBE_INTERVAL || '120000');
 const CUSTOM_PROXIES = process.env.CUSTOM_PROXIES || '';
 let FALLBACK_PROXY_RUNTIME = process.env.FALLBACK_PROXY || '';
-const ZENPROXY_RELAY = process.env.ZENPROXY_RELAY || 'https://zenproxy.top/api/relay';
-const ZENPROXY_KEY = process.env.ZENPROXY_KEY || '';
-const FORCE_RELAY = process.env.FORCE_RELAY === '1';
-
 const WARP_MODE = process.env.WARP_MODE || 'off';
 const WARP_SOCKS5_PORT = parseInt(process.env.WARP_SOCKS5_PORT || '1080');
 const WARP_HOST = process.env.WARP_HOST || '127.0.0.1';
@@ -380,6 +379,22 @@ function handleRateLimit(slotAddr: string, isWarpSlot: boolean) {
     if (existing) { existing.lastOk = Date.now(); existing.successCount++; }
     else { knownGoodProxies.set(slotAddr, { lastOk: Date.now(), successCount: 1 }); }
   }
+}
+
+// ── 429 指数退避冷却（借鉴 OCFreeRelay：保 slot 不删，冷却后复用）──
+const COOLDOWN_BASE_MS = 5000;
+const COOLDOWN_MAX_MS = 60000;
+
+function markSlotCooldown(slot: Slot, jitter = Math.random() * 1000): void {
+  slot.consecutiveFails = (slot.consecutiveFails || 0) + 1;
+  const backoff = Math.min(COOLDOWN_BASE_MS * Math.pow(2, slot.consecutiveFails - 1), COOLDOWN_MAX_MS);
+  slot.cooldownUntil = Date.now() + backoff + jitter;
+  console.log(`[冷却] ${slot.addr} 429/fail ×${slot.consecutiveFails} → ${Math.round(backoff/1000)}s 退避`);
+}
+
+function markSlotSuccess(slot: Slot): void {
+  slot.consecutiveFails = 0;
+  slot.cooldownUntil = 0;
 }
 
 const START_TIME = Date.now();
@@ -681,7 +696,16 @@ async function fetchSource(source: typeof DEFAULT_SOURCES[0]): Promise<ProxyItem
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), 15000);
   try {
-    if (warpModeRuntime === 'on' && warpSlot) {
+    if (source.no_warp) {
+      // no_warp 源跳过 WARP，直连拉取（如 scdn 被 WARP 出口屏蔽）
+      const res = await fetch(source.url, { signal: ctl.signal });
+      if (!res.ok) { console.warn(`[源][${source.name}] HTTP ${res.status}`); return []; }
+      const raw = source.type === 'json' ? await res.json() : await res.text();
+      const items = source.parser(raw);
+      if (items.length === 0) { console.warn(`[源][${source.name}] 空列表`); return []; }
+      console.log(`[源][${source.name}] ${items.length} 个代理`);
+      return items;
+    } else if (warpModeRuntime === 'on' && warpSlot) {
       const agent = new SocksProxyAgent(warpSlot.url, { timeout: 10000 }) as unknown as https.Agent;
       const body = await new Promise<string>((resolve, reject) => {
         const httpMod = source.url.startsWith('https://') ? https : http;
@@ -899,30 +923,6 @@ async function probeWarp(): Promise<boolean> {
     warpStatus = 'stopped';
     warpSlot = null;
     return false;
-  }
-}
-
-// ═══════════════════════════════════════════════════════════
-//  ZenProxy Relay 回退通道
-// ═══════════════════════════════════════════════════════════
-
-async function proxyViaRelay(
-  path: string, method: string, headers: Record<string, string>, body: string | undefined,
-): Promise<{ status: number; body?: string; stream?: ReadableStream<Uint8Array>; streamHeaders?: Record<string, string> }> {
-  const relayUrl = ZENPROXY_RELAY + path;
-  const relayHeaders: Record<string, string> = { ...headers, 'x-zenproxy-key': ZENPROXY_KEY };
-  try {
-    const res = await fetch(relayUrl, {
-      method,
-      headers: relayHeaders,
-      body,
-      signal: AbortSignal.timeout(60000),
-    });
-    const bodyText = await res.text();
-    return { status: res.status, body: bodyText };
-  } catch (e: any) {
-    console.error(`[ZenProxy] relay failed: ${e.message}`);
-    return { status: 502, body: JSON.stringify({ error: 'relay_failed', message: e.message }) };
   }
 }
 
@@ -1293,24 +1293,35 @@ async function dispatch(
   retry = 0, triedAddrs = new Set<string>(),
 ): Promise<{ status: number; body?: string; stream?: ReadableStream<Uint8Array>; streamHeaders?: Record<string, string> }> {
 
-  // 给模型名补 -free 后缀（上游要求带 -free 后缀的模型名才走免费额度）
+  // 请求体最小修复（借鉴 OCFreeRelay）：补 -free 后缀 + 剥 client_metadata + 限 tools 数
   if (body && path.includes('/chat/completions')) {
     try {
       const parsed = JSON.parse(body);
       if (parsed.model && !parsed.model.endsWith('-free')) {
         parsed.model = parsed.model + '-free';
-        body = JSON.stringify(parsed);
       }
+      if ('client_metadata' in parsed) delete parsed.client_metadata; // 上游拒绝该字段
+      if (Array.isArray(parsed.tools) && parsed.tools.length > 128) {
+        parsed.tools = parsed.tools.slice(0, 128); // 上游 tools 上限保护
+      }
+      body = JSON.stringify(parsed);
     } catch {}
   }
 
-  // 选择 slot：轮询 pool.slots，跳过已尝试的
-  console.log(`[调度] 尝试 slot pool: ${pool.slots.map(s => s.addr).join(', ')} | 已尝试: ${[...triedAddrs].join(', ') || '无'}`);
+  // 选择 slot：粘性优先 + 冷却感知（借鉴 OCFreeRelay）
+  // 粘住光标指向的 ready slot（保住 prompt 缓存热度），除非冷却/已尝试才轮换
+  console.log(`[调度] 尝试 slot pool: ${pool.slots.map(s => s.addr + (s.cooldownUntil && s.cooldownUntil > Date.now() ? '(冷却)' : '')).join(', ')} | 已尝试: ${[...triedAddrs].join(', ') || '无'}`);
   let selectedSlot: Slot | null = null;
-  for (let i = 0; i < pool.slots.length; i++) {
-    const idx = (pool.rrCursor + i) % pool.slots.length;
-    const s = pool.slots[idx];
-    if (!triedAddrs.has(s.addr)) {
+  const nowMs = Date.now();
+  const stickySlot = pool.slots[pool.rrCursor % pool.slots.length];
+  if (stickySlot && !triedAddrs.has(stickySlot.addr) && !(stickySlot.cooldownUntil && stickySlot.cooldownUntil > nowMs)) {
+    selectedSlot = stickySlot;
+  } else {
+    for (let i = 0; i < pool.slots.length; i++) {
+      const idx = (pool.rrCursor + i) % pool.slots.length;
+      const s = pool.slots[idx];
+      if (triedAddrs.has(s.addr)) continue;
+      if (s.cooldownUntil && s.cooldownUntil > nowMs) continue; // 冷却中跳过
       selectedSlot = s;
       pool.rrCursor = (idx + 1) % pool.slots.length;
       break;
@@ -1338,11 +1349,6 @@ async function dispatch(
   }
 
   if (!selectedSlot) {
-    // ZenProxy 兜底
-    if (ZENPROXY_KEY) {
-      console.log(`[调度] all slots failed, fallback → ZenProxy relay`);
-      return proxyViaRelay(path, method, headers, body);
-    }
     // 直连兜底（zero-proxy mode）
     console.log(`[调度] all proxies failed, fallback → 直连`);
     const start = Date.now();
@@ -1392,6 +1398,7 @@ async function dispatch(
       if (result.status >= 200 && result.status < 400) {
         stats.total++;
         trackSlotResult(selectedSlot.addr, true);
+        markSlotSuccess(selectedSlot);
         stats.success++;
         console.log(`[调度] ${selectedSlot.addr} stream OK ${result.status} (${latencyMs}ms) pool=${pool.keyId.slice(0,7)}...`);
         return { status: result.status, stream: result.stream, streamHeaders: result.headers };
@@ -1408,9 +1415,10 @@ async function dispatch(
       if (result.status === 429) {
         stats.rateLimited++;
         handleRateLimit(selectedSlot.addr, selectedSlot === warpSlot);
+        markSlotCooldown(selectedSlot); // 429 → 指数退避冷却（保 slot 不删）
       } else stats.errors++;
       console.error(`[调度] ${selectedSlot.addr} stream ${result.status} (${latencyMs}ms) retry=${retry}`);
-      if (result.status === 429 || result.status >= 500) {
+      if (result.status >= 500) {
         replaceFailedSlot(pool, selectedSlot.addr);
       }
       audit(result.status, latencyMs, selectedSlot.addr, path, errBody, pool.keyId);
@@ -1424,6 +1432,7 @@ async function dispatch(
       if (result.status >= 200 && result.status < 400) {
         stats.total++;
         trackSlotResult(selectedSlot.addr, true);
+        markSlotSuccess(selectedSlot);
         stats.success++;
         const usage = extractUsageFromResponse(result.body);
         if (usage.tokens > 0) recordKeyUsage(pool.keyId, usage.tokens);
@@ -1435,9 +1444,10 @@ async function dispatch(
       if (result.status === 429) {
         stats.rateLimited++;
         handleRateLimit(selectedSlot.addr, selectedSlot === warpSlot);
+        markSlotCooldown(selectedSlot); // 429 → 指数退避冷却（保 slot 不删）
       } else stats.errors++;
       console.error(`[调度] ${selectedSlot.addr} ${result.status} (${latencyMs}ms) retry=${retry}`);
-      if (result.status === 429 || result.status >= 500) {
+      if (result.status >= 500) {
         replaceFailedSlot(pool, selectedSlot.addr);
       }
       audit(result.status, latencyMs, selectedSlot.addr, path, result.body, pool.keyId);
@@ -1450,6 +1460,7 @@ async function dispatch(
     stats.total++;
     stats.errors++;
     console.error(`[调度] ${selectedSlot.addr} 异常: ${e.message} retry=${retry}`);
+    markSlotCooldown(selectedSlot);
     replaceFailedSlot(pool, selectedSlot.addr);
     audit(502, Date.now() - start, selectedSlot.addr, path, JSON.stringify({ error: e.message }), pool.keyId);
     if (retry < MAX_RETRIES) {

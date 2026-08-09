@@ -10,7 +10,7 @@ opencode-gate 是一个 TypeScript 编写的反向代理网关，专为 [opencod
 - 每个 API Key 独立持有 3 个代理 Slot（`SLOTS_PER_KEY`），全局最多 20 个 Key 同时活跃（`MAX_ACTIVE_KEYS`）
 - 请求级 Round-Robin 轮询，不仅故障时切换，正常请求也均匀分布
 - 失败 Slot 自动探活替换，释放后立即回收
-- 五级 Fallback 链：Pool Slots → WARP → Custom Proxies → ZenProxy Relay → 直连
+- 四级 Fallback 链：Pool Slots → WARP → Custom Proxies → 直连
 - 内置订阅管理、审计日志、Key 管理 REST API
 - 支持流式（SSE）和非流式 OpenAI 兼容请求转发
 
@@ -28,8 +28,7 @@ opencode-gate 是一个 TypeScript 编写的反向代理网关，专为 [opencod
                         │  1. RR select slot from pool     │
                         │  2. fallback → WARP              │
                         │  3. fallback → customSlots       │
-                        │  4. fallback → ZenProxy relay    │
-                        │  5. fallback → 直连              │
+                        │  4. fallback → 直连              │
                         └──────────┬──────────────────────┘
                                    │
               ┌────────────────────┼────────────────────┐
@@ -89,18 +88,18 @@ opencode-gate 是一个 TypeScript 编写的反向代理网关，专为 [opencod
 
 ### 请求调度（dispatch）
 
-每次请求的调度逻辑 `gate.ts:875-1021`：
+每次请求的调度逻辑 `gate.ts`：
 
-1. **Round-Robin 选择 Slot**：从 `pool.rrCursor` 开始遍历所有 Slot，跳过已尝试的地址。选中后 `rrCursor` 前移
+1. **粘性优先（Sticky）+ 冷却感知选择 Slot**：优先复用 `rrCursor` 指向的**就绪（未冷却）** Slot，从而**保住该代理上的 prompt 缓存热度**；仅当该 Slot 已尝试过或处于冷却期才轮换
 2. **Pool Slots 耗尽** → 尝试 **WARP Slot**（全局共享）
 3. **WARP 不可用** → 尝试 **Custom Slots**（`customSlots[]`，来自 `CUSTOM_PROXIES` env）
-4. **均不可用且配置了 `ZENPROXY_KEY`** → **ZenProxy Relay** 兜底
-5. **全部失败** → **直连** 兜底
+4. **全部失败** → **直连** 兜底
 
-失败处理：
-- HTTP 429 或 5xx → `replaceFailedSlot()` 移除该 Slot，从候选池选新代理探活后补入
-- 重试 `MAX_RETRIES`（3）次，每次跳过已尝试地址
-- 异常或超时同样触发替换
+失败处理（借鉴 OCFreeRelay）：
+- **HTTP 429** → `markSlotCooldown()` 对该 Slot **指数退避冷却**（5s → 60s，保 Slot 不删，冷却后复用）
+- **HTTP 5xx** → `replaceFailedSlot()` 移除该 Slot，从候选池选新代理探活后补入
+- 重试 `MAX_RETRIES`（3）次，每次跳过已尝试且**未冷却**的地址
+- 异常或超时同样记录冷却并触发替换
 
 ### Slot 替换策略
 
@@ -109,17 +108,22 @@ opencode-gate 是一个 TypeScript 编写的反向代理网关，专为 [opencod
 2. 从 `candidates` 中查找未锁定的代理
 3. 异步 `probe()` 探活，成功则 Push 到 Pool 末尾，标记 `lockedBy`
 
-### Round-Robin 调度策略
+### 粘性 + 冷却调度策略
 
 每个 Key 的 Slot Pool 维护 `rrCursor`，每次 `dispatch()` 选择 Slot 时：
 
 ```typescript
-const idx = (pool.rrCursor + i) % pool.slots.length;
-// ...选中后...
-pool.rrCursor = (idx + 1) % pool.slots.length;
+const stickySlot = pool.slots[pool.rrCursor % pool.slots.length];
+if (stickySlot && !tried && !(stickySlot.cooldownUntil > now)) {
+  selectedSlot = stickySlot;   // 粘性：继续复用，保住 prompt 缓存
+} else {
+  // 轮询下一个就绪且未冷却的 Slot
+}
 ```
 
-这确保**每次请求**（而非仅故障时）轮换代理，公平负载均衡。`selectedSlot = null` 时触发 fallback 链向下传递。
+- **粘性**：只要当前 Slot 就绪就持续复用（非每次轮换），显著提升 OpenCode 免费模型的 **prompt 缓存命中率**、降低 429。
+- **冷却**：429/异常后指数退避（5s→60s+jitter），冷却期间该 Slot 被跳过但**不会被删除**，冷却结束后可复用。
+- `selectedSlot = null` 时触发 fallback 链向下传递。
 
 ## 代理源（Proxy Sources）
 
@@ -298,9 +302,6 @@ curl -X POST http://localhost:13339/api/warp \
 | `WARP_HOST` | `172.17.0.1` | WARP SOCKS5 主机 |
 | `WARP_SOCKS5_PORT` | `1080` | WARP SOCKS5 端口 |
 | `CUSTOM_PROXIES` | `""` | 逗号分隔的自定义代理地址 |
-| `ZENPROXY_RELAY` | `https://zenproxy.top/api/relay` | ZenProxy Relay URL |
-| `ZENPROXY_KEY` | `""` | ZenProxy 密钥（为空禁用 relay） |
-| `FORCE_RELAY` | `""` | 设为 `1` 时强制使用 relay |
 | `PROXY_POOL_URL` | `""` | 外部 proxy-pool API URL |
 | `CLASH_SUBSCRIBE_URLS` | FreeSub 默认 YAML | 逗号/分号分隔的订阅 URL |
 
