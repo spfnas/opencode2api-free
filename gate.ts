@@ -1,12 +1,8 @@
-#!/usr/bin/env bun
+#!/usr/bin/env bun 
 
 /**
- * opencode-free-gate — Per-Key IP Pool 反代网关
- *
- * 每个 API Key 拥有独立的代理 slot 池（最多 SLOTS_PER_KEY 个）
- * 全局最多 MAX_ACTIVE_KEYS 个 Key 同时活跃
- * 失败自动替换 slot，超时自动释放
- * WARP 作为全局共享 fallback
+ * opencode-free-gate — SingBox 反代网关
+ * 去掉公共代理池，改用 sing-box 订阅节点 + 429 自动切换 + 直连兜底
  */
 
 import https from 'node:https';
@@ -14,50 +10,25 @@ import http from 'node:http';
 import path from 'node:path';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
-import { HttpsProxyAgent } from 'hpagent';
-import { SocksProxyAgent } from 'socks-proxy-agent';
+import net from 'node:net';
 
 // ═══════════════════════════════════════════════════════════
 //  类型定义
 // ═══════════════════════════════════════════════════════════
 
-interface ProxyItem {
-  address: string;
-  fullAddr?: string;
-  protocol: string;
-  latency: number;
-  quality_grade: string;
+interface ApiKeyRecord {
+  key: string; name: string; enabled: boolean;
+  createdAt: number; lastUsedAt: number;
+  totalRequests: number; totalTokens: number;
+  maxConcurrency: number; maxRequests: number;
+  requestCount: number; expiresAt: number;
 }
 
-interface Slot {
-  addr: string;
-  url: string;
-  proto: 'http' | 'socks5';
-  latencyMs: number;
-  qualityGrade: string;
-  cooldownUntil?: number;
-  consecutiveFails?: number;
-}
-
-interface KeySlotPool {
-  keyId: string;
-  slots: Slot[];
-  rrCursor: number;
-  lastUsedAt: number;
-}
-
-interface CandidateItem extends ProxyItem {
-  lockedBy: string | null;
-}
-
-interface ReleasedCandidateItem {
-  address: string;
-  protocol: string;
-  quality_grade: string;
-  lastFailedAt: number;
-  lastSucceededAt: number;
-  consecutiveFailures: number;
-  consecutiveSuccesses: number;
+interface AuditEntry {
+  ts: number; keyId: string; model: string;
+  promptTokens: number; completionTokens: number; totalTokens: number;
+  cacheCreation: number; cacheRead: number;
+  latencyMs: number; status: number;
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -65,226 +36,13 @@ interface ReleasedCandidateItem {
 // ═══════════════════════════════════════════════════════════
 
 const DATA_DIR = process.env.DATA_DIR || process.cwd();
-// 确保 DATA_DIR 存在
 try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
 
 const KEYS_FILE = path.join(DATA_DIR, 'keys.json');
-const SOURCES_FILE = path.join(DATA_DIR, 'sources.json');
-const CUSTOM_PROXIES_FILE = path.join(DATA_DIR, 'custom_proxies.json');
 const AUDIT_FILE = path.join(DATA_DIR, 'audit.jsonl');
-const RELEASED_CANDIDATES_FILE = path.join(DATA_DIR, 'released_candidates.json');
-const FALLBACK_PROXY_FILE = path.join(DATA_DIR, 'fallback_proxy.json');
-
-// ═══════════════════════════════════════════════════════════
-//  代理源配置（动态，持久化到 sources.json）
-// ═══════════════════════════════════════════════════════════
-
-const DEFAULT_SOURCES = [
-  {
-    name: 'amux',
-    url: 'https://proxy.amux.ai/api/proxies',
-    type: 'json' as const,
-    parser: (data: any): ProxyItem[] => {
-      const list: any[] = Array.isArray(data) ? data : [];
-      return list
-        .filter((p) => ['S','A','B','C'].includes(p.quality_grade) && p.status === 'active')
-        .map((p) => ({ address: p.address, protocol: p.protocol, latency: p.latency || 999, quality_grade: p.quality_grade }));
-    },
-  },
-  {
-    name: 'speedx-socks5',
-    url: 'https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks5.txt',
-    type: 'text' as const,
-    parser: (data: string): ProxyItem[] => {
-      return data.split('\n')
-        .map(line => line.trim())
-        .filter(line => line && /^\d+\.\d+\.\d+\.\d+:\d+$/.test(line))
-        .map(line => ({ address: line, protocol: 'socks5', latency: 999, quality_grade: 'C' }));
-    },
-  },
-];
-
-// 通用文本 parser：支持 http://user:pass@ip:port、socks5://ip:port、ip:port 等格式
-function genericTextParser(data: string, proto?: string): ProxyItem[] {
-  return data.split('\n')
-    .map(line => line.trim())
-    .filter(line => line && !line.startsWith('#'))
-    .map(line => {
-      // http://user:pass@ip:port 或 socks5://user:pass@ip:port
-      const m0 = line.match(/^(socks[45]|https?):\/\/([^@]+)@(\d+\.\d+\.\d+\.\d+):(\d+)$/);
-      if (m0) {
-        const fullAddr = `${m0[3]}:${m0[4]}`;
-        const addrWithAuth = `${m0[2]}@${m0[3]}:${m0[4]}`;
-        return { address: fullAddr, fullAddr: addrWithAuth, protocol: m0[1].replace('https', 'http'), latency: 999, quality_grade: 'C' };
-      }
-      // socks5://ip:port 或 http://ip:port
-      const m1 = line.match(/^(socks[45]|http|https):\/\/(\d+\.\d+\.\d+\.\d+):(\d+)$/);
-      if (m1) return { address: `${m1[2]}:${m1[3]}`, protocol: m1[1].replace('https', 'http'), latency: 999, quality_grade: 'C' };
-      // ip:port 纯文本
-      const m2 = line.match(/^(\d+\.\d+\.\d+\.\d+):(\d+)$/);
-      if (m2) return { address: line, protocol: proto || 'socks5', latency: 999, quality_grade: 'C' };
-      return null;
-    })
-    .filter((x): x is ProxyItem => x !== null);
-}
-
-let proxySources: typeof DEFAULT_SOURCES = [];
-
-function loadSources() {
-  try {
-    const raw = JSON.parse(fs.readFileSync(SOURCES_FILE, 'utf-8'));
-    // 从文件恢复 parser 是序列化不了的，用默认源的 parser 按 name 匹配
-    proxySources = raw.map((s: any) => {
-      const def = DEFAULT_SOURCES.find(d => d.name === s.name);
-      const srcType = s.type || 'json';
-      return {
-        name: s.name,
-        url: s.url,
-        type: srcType,
-        no_warp: !!s.no_warp,
-        parser: def ? def.parser : (srcType === 'json' ? DEFAULT_SOURCES[0].parser : (data: string) => genericTextParser(data, s.protocol)),
-      };
-    });
-    console.log(`[源] 已加载 ${proxySources.length} 个代理源`);
-  } catch {
-    proxySources = DEFAULT_SOURCES.map(s => ({ ...s }));
-    saveSources();
-  }
-}
-
-function saveSources() {
-  try {
-    const data = proxySources.map(s => ({ name: s.name, url: s.url, type: s.type }));
-    fs.writeFileSync(SOURCES_FILE, JSON.stringify(data, null, 2), 'utf-8');
-  } catch (e: any) {
-    console.error(`[源] 保存失败: ${e.message}`);
-  }
-}
-
-// ═══════════════════════════════════════════════════════════
-//  自定义代理持久化
-// ═══════════════════════════════════════════════════════════
-
-let customProxyItems: ProxyItem[] = [];
-
-function loadCustomProxies() {
-  try {
-    const data = JSON.parse(fs.readFileSync(CUSTOM_PROXIES_FILE, 'utf-8'));
-    customProxyItems = Array.isArray(data) ? data : [];
-    console.log(`[自定义代理] 已加载 ${customProxyItems.length} 个`);
-  } catch {
-    customProxyItems = [];
-  }
-}
-
-function saveCustomProxies() {
-  try {
-    fs.writeFileSync(CUSTOM_PROXIES_FILE, JSON.stringify(customProxyItems, null, 2), 'utf-8');
-  } catch (e: any) {
-    console.error(`[自定义代理] 保存失败: ${e.message}`);
-  }
-}
-
-// ═══════════════════════════════════════════════════════════
-//  备用候选池管理（释放后测活）
-// ═══════════════════════════════════════════════════════════
-
-function loadReleasedCandidates() {
-  try {
-    const data = JSON.parse(fs.readFileSync(RELEASED_CANDIDATES_FILE, 'utf-8'));
-    releasedCandidates = Array.isArray(data) ? data : [];
-    console.log(`[备用池] 已加载 ${releasedCandidates.length} 个备用候选`);
-  } catch {
-    releasedCandidates = [];
-  }
-}
-
-function saveReleasedCandidates() {
-  try {
-    const now = Date.now();
-    // 清理超过 24 小时未成功的
-    releasedCandidates = releasedCandidates.filter(r => (now - r.lastFailedAt) < 86400000);
-    fs.writeFileSync(RELEASED_CANDIDATES_FILE, JSON.stringify(releasedCandidates, null, 2), 'utf-8');
-  } catch (e: any) {
-    console.error(`[备用池] 保存失败: ${e.message}`);
-  }
-}
-
-function addReleasedCandidate(item: ProxyItem & { lockedBy?: string | null }) {
-  const existing = releasedCandidates.find(r => r.address === item.address);
-  if (existing) {
-    existing.lastFailedAt = Date.now();
-    existing.consecutiveFailures++;
-  } else {
-    releasedCandidates.push({
-      address: item.address,
-      protocol: item.protocol,
-      quality_grade: item.quality_grade || 'C',
-      lastFailedAt: Date.now(),
-      lastSucceededAt: 0,
-      consecutiveFailures: 1,
-      consecutiveSuccesses: 0,
-    });
-  }
-  saveReleasedCandidates();
-}
-
-async function probeReleasedCandidates(): Promise<void> {
-  if (releasedCandidates.length === 0) return;
-  const now = Date.now();
-  const toProbe = releasedCandidates.filter(r => (now - r.lastFailedAt) > RELEASED_CANDIDATE_PROBE_INTERVAL);
-  if (toProbe.length === 0) return;
-
-  console.log(`[备用池] 对 ${toProbe.length} 个备用候选进行测活...`);
-  
-  for (const rc of toProbe) {
-    try {
-      // 第一步：TCP 快速检查
-      const tcpOk = await tcpCheck(rc.address, TCP_FAST_CHECK_TIMEOUT);
-      if (!tcpOk) {
-        rc.lastFailedAt = now;
-        rc.consecutiveFailures++;
-        rc.consecutiveSuccesses = 0;
-        continue;
-      }
-
-      // 第二步：HTTP 探活
-      const proxyItem: ProxyItem = { address: rc.address, protocol: rc.protocol, latency: 999, quality_grade: rc.quality_grade };
-      const probeResult = await probe(proxyItem);
-      if (probeResult.ok) {
-        rc.consecutiveSuccesses++;
-        rc.lastSucceededAt = now;
-        rc.consecutiveFailures = 0;
-        console.log(`[备用池+] ${rc.address} 测活成功 (${probeResult.latencyMs}ms)，可重新加入活跃池`);
-        
-        // 连续成功 2 次，重新加入候选池
-        if (rc.consecutiveSuccesses >= 2) {
-          const idx = releasedCandidates.indexOf(rc);
-          if (idx >= 0) releasedCandidates.splice(idx, 1);
-          const existing = candidates.find(c => c.address === rc.address);
-          if (!existing) {
-            candidates.push({
-              address: rc.address,
-              protocol: rc.protocol,
-              latency: probeResult.latencyMs,
-              quality_grade: rc.quality_grade,
-              lockedBy: null,
-            });
-            console.log(`[备用池→活跃] ${rc.address} 已重新加入候选池`);
-          }
-        }
-      } else {
-        rc.lastFailedAt = now;
-        rc.consecutiveFailures++;
-        rc.consecutiveSuccesses = 0;
-      }
-    } catch (e: any) {
-      rc.lastFailedAt = now;
-      rc.consecutiveFailures++;
-    }
-  }
-  saveReleasedCandidates();
-}
+const MODELS_CACHE_FILE = path.join(DATA_DIR, 'models_cache.json');
+const SINGBOX_CONFIG_DIR = path.join(process.cwd(), 'singbox');
+const SUBSCRIPTION_FILE = path.join(DATA_DIR, 'subscription.json');
 
 // ═══════════════════════════════════════════════════════════
 //  常量
@@ -296,286 +54,36 @@ const MAX_RETRIES = 3;
 const TIMEOUT = 15000;
 const STREAM_TIMEOUT = 300000;
 
-const MAX_ACTIVE_KEYS = 20;
-const SLOTS_PER_KEY = 3;
-const PROBE_BATCH_SIZE = parseInt(process.env.PROBE_BATCH_SIZE || '80');
-const POOL_CLEANUP_MS = 60000;
-const KEY_IDLE_RELEASE_MS = 600000;
+// SingBox 配置
+const SINGBOX_HOST = process.env.SINGBOX_HOST || '127.0.0.1';
+const SINGBOX_HTTP_PORT = parseInt(process.env.SINGBOX_HTTP_PORT || '10800');
+const SINGBOX_SOCKS_PORT = parseInt(process.env.SINGBOX_SOCKS_PORT || '10801');
+const SINGBOX_API_PORT = parseInt(process.env.SINGBOX_API_PORT || '9090');
+const SINGBOX_MODE = process.env.SINGBOX_MODE || 'on';
 
-const PROXY_PROBE_TIMEOUT = parseInt(process.env.PROXY_PROBE_TIMEOUT || '8000');
-const PROXY_REFRESH_MS = parseInt(process.env.PROXY_REFRESH_MS || '300000');
-const TCP_FAST_CHECK_TIMEOUT = parseInt(process.env.TCP_FAST_CHECK_TIMEOUT || '2000');
-const RELEASED_CANDIDATE_PROBE_INTERVAL = parseInt(process.env.RELEASED_CANDIDATE_PROBE_INTERVAL || '120000');
-const CUSTOM_PROXIES = process.env.CUSTOM_PROXIES || '';
-let FALLBACK_PROXY_RUNTIME = process.env.FALLBACK_PROXY || '';
-const WARP_MODE = process.env.WARP_MODE || 'off';
-const WARP_SOCKS5_PORT = parseInt(process.env.WARP_SOCKS5_PORT || '1080');
-const WARP_HOST = process.env.WARP_HOST || '127.0.0.1';
+const SINGBOX_SOCKS_URL = `socks5h://${SINGBOX_HOST}:${SINGBOX_SOCKS_PORT}`;
+const SINGBOX_API_URL = `http://${SINGBOX_HOST}:${SINGBOX_API_PORT}`;
+
+const API_KEY = process.env.API_KEY || 'admin123';
+const START_TIME = Date.now();
 
 // ═══════════════════════════════════════════════════════════
 //  全局状态
 // ═══════════════════════════════════════════════════════════
 
-let warpModeRuntime = WARP_MODE;
-let warpHostRuntime = WARP_HOST;
-let warpPortRuntime = WARP_SOCKS5_PORT;
-let warpStatus: 'unknown' | 'running' | 'stopped' = 'unknown';
-let warpSlot: Slot | null = null;
-
-let cachedModels: any[] = [];
-let cachedModelsTime = 0;
-
-const API_KEY = process.env.API_KEY || 'admin123';
-
-let candidates: CandidateItem[] = [];
-let releasedCandidates: ReleasedCandidateItem[] = [];
-let customSlots: Slot[] = [];
-let fallbackSlot: Slot | null = null;
-let keySlotPools: Map<string, KeySlotPool> = new Map();
-let refreshing = false;
-let slotFailureTracker = new Map<string, { consecutiveFailures: number }>();
-// Known-good proxies: recently verified working (for allocation priority)
-const knownGoodProxies = new Map<string, { lastOk: number, successCount: number }>();
-// WARP 429 backoff: skip WARP when recently rate-limited
-let warp429SkipUntil = 0;
-
-// Track per-slot failure count to avoid releasing on transient glitches
-function trackSlotResult(addr: string, success: boolean) {
-  let entry = slotFailureTracker.get(addr);
-  if (!entry) { entry = { consecutiveFailures: 0 }; slotFailureTracker.set(addr, entry); }
-  if (success) {
-    entry.consecutiveFailures = 0;
-    // Track known-good for allocation priority
-    const existing = knownGoodProxies.get(addr);
-    if (existing) {
-      existing.lastOk = Date.now();
-      existing.successCount++;
-    } else {
-      knownGoodProxies.set(addr, { lastOk: Date.now(), successCount: 1 });
-    }
-    // GC: keep under 500 entries
-    if (knownGoodProxies.size > 500) {
-      const oldest = knownGoodProxies.keys().next().value;
-      if (oldest) knownGoodProxies.delete(oldest);
-    }
-  } else {
-    entry.consecutiveFailures++;
-  }
-  // GC: keep under 1000 entries
-  if (slotFailureTracker.size > 1000) { const oldest = slotFailureTracker.keys().next().value; if (oldest) slotFailureTracker.delete(oldest); }
-}
-
-// Record a rate-limited (429) response: proxy reachable but upstream throttled.
-// Mark proxy known-good (so we retry it) and apply WARP 429 backoff if it's WARP.
-function handleRateLimit(slotAddr: string, isWarpSlot: boolean) {
-  if (isWarpSlot && warpSlot && slotAddr === warpSlot.addr) {
-    // WARP 出口被上游限流 → 退避，避免连续被限更狠
-    const backoffMs = 30000 + Math.floor(Math.random() * 20000); // 30-50s
-    warp429SkipUntil = Date.now() + backoffMs;
-    console.log(`[限流] WARP 429 → ${backoffMs/1000}s 后跳过 WARP`);
-  } else {
-    // 普通代理 429：说明代理可达，仅上游限流 → 记为 known-good 下次优先尝试
-    const existing = knownGoodProxies.get(slotAddr);
-    if (existing) { existing.lastOk = Date.now(); existing.successCount++; }
-    else { knownGoodProxies.set(slotAddr, { lastOk: Date.now(), successCount: 1 }); }
-  }
-}
-
-// ── 429 指数退避冷却（借鉴 OCFreeRelay：保 slot 不删，冷却后复用）──
-const COOLDOWN_BASE_MS = 5000;
-const COOLDOWN_MAX_MS = 60000;
-
-function markSlotCooldown(slot: Slot, jitter = Math.random() * 1000): void {
-  slot.consecutiveFails = (slot.consecutiveFails || 0) + 1;
-  const backoff = Math.min(COOLDOWN_BASE_MS * Math.pow(2, slot.consecutiveFails - 1), COOLDOWN_MAX_MS);
-  slot.cooldownUntil = Date.now() + backoff + jitter;
-  console.log(`[冷却] ${slot.addr} 429/fail ×${slot.consecutiveFails} → ${Math.round(backoff/1000)}s 退避`);
-}
-
-function markSlotSuccess(slot: Slot): void {
-  slot.consecutiveFails = 0;
-  slot.cooldownUntil = 0;
-}
-
-const START_TIME = Date.now();
-const stats = { total: 0, success: 0, rateLimited: 0, errors: 0 };
-const recentLogs: string[] = [];
-const MAX_LOGS = 500;
-
-// ═══════════════════════════════════════════════════════════
-//  Agent 连接池（LRU 缓存，避免重复 TCP 握手）
-// ═══════════════════════════════════════════════════════════
-
-const agentCache = new Map<string, https.Agent | http.Agent>();
-const AGENT_CACHE_MAX = 50;
-function getCachedAgent(url: string, proto: 'http' | 'socks5'): https.Agent | http.Agent | undefined {
-  if (!url) return undefined;
-  const key = `${proto}::${url}`;
-  let agent = agentCache.get(key);
-  if (agent) {
-    // LRU: 删除再重插实现"最近使用"
-    agentCache.delete(key);
-    agentCache.set(key, agent);
-    return agent;
-  }
-  if (agentCache.size >= AGENT_CACHE_MAX) {
-    const oldest = agentCache.keys().next().value;
-    if (oldest) { const old = agentCache.get(oldest); agentCache.delete(oldest); try { (old as any)?.destroy?.(); } catch {} }
-  }
-  try {
-    if (proto === 'socks5') {
-      agent = new SocksProxyAgent(url, { timeout: TIMEOUT }) as unknown as https.Agent;
-    } else {
-      agent = new HttpsProxyAgent({ proxy: url, timeout: TIMEOUT, rejectUnauthorized: false }) as unknown as https.Agent;
-    }
-    agentCache.set(key, agent);
-    return agent;
-  } catch { return undefined; }
-}
-function clearAgentCache() {
-  for (const [k, a] of agentCache) { try { (a as any)?.destroy?.(); } catch {} }
-  agentCache.clear();
-}
-
-// ═══════════════════════════════════════════════════════════
-//  审计异步写入（流式写入，避免同步 I/O 阻塞事件循环）
-// ═══════════════════════════════════════════════════════════
-
-let auditStream: fs.WriteStream | null = null;
-let auditBuffer: string[] = [];
-const AUDIT_FLUSH_INTERVAL = 5000; // 5s flush 一次
-const AUDIT_BATCH_SIZE = 50;       // 或攒 50 条就 flush
-
-function initAuditStream() {
-  try {
-    auditStream = fs.createWriteStream(AUDIT_FILE, { flags: 'a', encoding: 'utf-8' });
-    auditStream.on('error', () => {});
-  } catch {}
-}
-function flushAudit() {
-  if (auditBuffer.length === 0) return;
-  const batch = auditBuffer.splice(0);
-  if (auditStream && auditStream.writable) {
-    auditStream.write(batch.join('') + '\n');
-  } else {
-    // fallback: 同步写入
-    try { fs.appendFileSync(AUDIT_FILE, batch.join('') + '\n', 'utf-8'); } catch {}
-  }
-}
-setInterval(flushAudit, AUDIT_FLUSH_INTERVAL);
-
-// ═══════════════════════════════════════════════════════════
-//  模型缓存持久化
-// ═══════════════════════════════════════════════════════════
-
-const MODELS_CACHE_FILE = path.join(DATA_DIR, 'models_cache.json');
-function saveModelsCache(models: any[]) {
-  try { fs.writeFileSync(MODELS_CACHE_FILE, JSON.stringify({ models, ts: Date.now() }), 'utf-8'); } catch {}
-}
-function loadModelsCache(): { models: any[]; ts: number } | null {
-  try {
-    if (!fs.existsSync(MODELS_CACHE_FILE)) return null;
-    return JSON.parse(fs.readFileSync(MODELS_CACHE_FILE, 'utf-8'));
-  } catch { return null; }
-}
-
-// ═══════════════════════════════════════════════════════════
-//  审计 & API Key 管理
-// ═══════════════════════════════════════════════════════════
-
-interface AuditEntry {
-  ts: number;
-  keyId: string;
-  model: string;
-  promptTokens: number;
-  completionTokens: number;
-  totalTokens: number;
-  cacheCreation: number;
-  cacheRead: number;
-  latencyMs: number;
-  status: number;
-  slotAddr: string;
-}
-const auditLog: AuditEntry[] = [];
-const MAX_AUDIT = 10000;
-
-interface ApiKeyRecord {
-  key: string;
-  name: string;
-  enabled: boolean;
-  createdAt: number;
-  lastUsedAt: number;
-  totalRequests: number;
-  totalTokens: number;
-  maxConcurrency: number;
-  maxRequests: number;
-  requestCount: number;
-  expiresAt: number;
-}
 let apiKeys: Record<string, ApiKeyRecord> = {};
 let activeRequests: Record<string, number> = {};
+let cachedModels: any[] = [];
+let cachedModelsTime = 0;
+let stats = { total: 0, success: 0, rateLimited: 0, errors: 0 };
+let singboxNodeIndex = 0;
+let singboxNodes: string[] = [];
+let singboxOk = false;
 
-function loadKeys() {
-  try {
-    const data = fs.readFileSync(KEYS_FILE, 'utf-8');
-    apiKeys = JSON.parse(data);
-    console.log(`[密钥] 已加载 ${Object.keys(apiKeys).length} 个 API Key`);
-  } catch {
-    apiKeys = {};
-    saveKeys();
-  }
-  if (!apiKeys[API_KEY]) {
-    apiKeys[API_KEY] = {
-      key: API_KEY, name: '默认', enabled: true, createdAt: Date.now(),
-      lastUsedAt: 0, totalRequests: 0, totalTokens: 0,
-      maxConcurrency: 0, maxRequests: 0, requestCount: 0, expiresAt: 0,
-    };
-    saveKeys();
-  } else {
-    const r = apiKeys[API_KEY];
-    if (r.maxConcurrency === undefined) r.maxConcurrency = 0;
-    if (r.maxRequests === undefined) r.maxRequests = 0;
-    if (r.requestCount === undefined) r.requestCount = 0;
-    if (r.expiresAt === undefined) r.expiresAt = 0;
-  }
-}
-
-function saveKeys() {
-  try {
-    fs.writeFileSync(KEYS_FILE, JSON.stringify(apiKeys, null, 2), 'utf-8');
-  } catch (e: any) {
-    console.error(`[密钥] 保存失败: ${e.message}`);
-  }
-}
-
-function validateKey(key: string): { ok: boolean; reason?: string } {
-  const record = apiKeys[key];
-  if (!record) return { ok: false, reason: 'Key 不存在' };
-  if (!record.enabled) return { ok: false, reason: 'Key 已禁用' };
-  if (record.expiresAt > 0 && Date.now() > record.expiresAt) return { ok: false, reason: 'Key 已过期' };
-  if (record.maxRequests > 0 && record.requestCount >= record.maxRequests) return { ok: false, reason: '调用次数已达上限' };
-  if (record.maxConcurrency > 0 && (activeRequests[key] || 0) >= record.maxConcurrency) return { ok: false, reason: '并发数已达上限' };
-  return { ok: true };
-}
-
-function acquireKey(key: string) {
-  activeRequests[key] = (activeRequests[key] || 0) + 1;
-}
-
-function releaseKey(key: string) {
-  if (activeRequests[key] && activeRequests[key] > 0) activeRequests[key]--;
-}
-
-function recordKeyUsage(key: string, tokens: number) {
-  const record = apiKeys[key];
-  if (record) {
-    record.lastUsedAt = Date.now();
-    record.totalRequests++;
-    record.requestCount++;
-    record.totalTokens += tokens;
-    saveKeys();
-  }
-}
+const recentLogs: string[] = [];
+const MAX_LOGS = 500;
+const auditLog: AuditEntry[] = [];
+const MAX_AUDIT = 10000;
 
 // ═══════════════════════════════════════════════════════════
 //  日志捕获
@@ -589,21 +97,18 @@ function logCapture(s: string) {
 const _origLog = console.log;
 console.log = (...args: any[]) => {
   const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
-  logCapture(msg);
-  _origLog.apply(console, args);
-};
-const _origWarn = console.warn;
-console.warn = (...args: any[]) => {
-  const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
-  logCapture(`⚠️ ${msg}`);
-  _origWarn.apply(console, args);
+  logCapture(msg); _origLog.apply(console, args);
 };
 const _origError = console.error;
 console.error = (...args: any[]) => {
   const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
-  logCapture(`❌ ${msg}`);
-  _origError.apply(console, args);
+  logCapture(`❌ ${msg}`); _origError.apply(console, args);
 };
+
+// ═══════════════════════════════════════════════════════════
+//  上游 Header 白名单（兼容旧 opencode-gate 行为）
+//  只转发这些 header，避免把客户端的 UA/accept-encoding 等脏数据传给上游
+// ═══════════════════════════════════════════════════════════
 
 const FORWARD = [
   'authorization', 'x-opencode-project', 'x-opencode-session',
@@ -611,561 +116,466 @@ const FORWARD = [
   'accept', 'anthropic-version', 'anthropic-beta',
 ];
 
-// ═══════════════════════════════════════════════════════════
-//  自定义代理（兜底备用）
-// ═══════════════════════════════════════════════════════════
-
-function parseCustomProxies(input: string): ProxyItem[] {
-  if (!input.trim()) return [];
-  return input.split(',').map((addr) => {
-    const trimmed = addr.trim();
-    if (!trimmed) return null;
-    let isSocks = trimmed.startsWith('socks5://') || trimmed.startsWith('socks5h://');
-    // 保留完整地址（含认证信息）用于构建代理 URL
-    const fullAddr = trimmed.replace(/^https?:\/\//, '').replace(/^socks5h?:\/\//, '');
-    // 去掉认证信息 user:pass@ 得到纯 ip:port
-    const cleanAddr = fullAddr.replace(/^[^@]+@/, '');
-    const proxyItem: ProxyItem = {
-      address: cleanAddr,
-      fullAddr: fullAddr,
-      protocol: isSocks ? 'socks5' : 'http',
-      latency: 0,
-      quality_grade: 'custom',
-    };
-    return proxyItem;
-  }).filter((p): p is ProxyItem => p !== null && p.address);
-}
-
-async function initCustomSlots(): Promise<void> {
-  if (!CUSTOM_PROXIES) return;
-  const items = parseCustomProxies(CUSTOM_PROXIES);
-  if (items.length === 0) return;
-  const results = await Promise.all(items.map(async (item) => {
-    const r = await probe(item);
-    return { item, ...r };
-  }));
-  for (const r of results) {
-    if (!r.ok) continue;
-    const url = r.item.protocol === 'socks5' ? `socks5h://${r.item.fullAddr}` : `http://${r.item.fullAddr}`;
-    customSlots.push({ addr: r.item.address, url, proto: r.item.protocol as 'http' | 'socks5', latencyMs: r.latencyMs || 0, qualityGrade: 'C' });
-    console.log(`[兜底+] ${r.item.address} (${r.latencyMs}ms)`);
+function collectHeadersFromReq(nodeReq: http.IncomingMessage): Record<string, string> {
+  const h: Record<string, string> = {};
+  for (const k of FORWARD) {
+    if (k === 'authorization') continue;
+    const v = nodeReq.headers[k];
+    if (v) h[k] = Array.isArray(v) ? v[0] : v;
   }
-  console.log(`[兜底] ${customSlots.length}/${items.length} custom proxies ready`);
+  h['authorization'] = 'Bearer public';
+  if (!h['x-opencode-client']) h['x-opencode-client'] = 'desktop';
+  if (!h['content-type']) h['content-type'] = 'application/json';
+  return h;
 }
 
 // ═══════════════════════════════════════════════════════════
-//  自定义 Fallback 代理初始化
+//  SingBox 管理
 // ═══════════════════════════════════════════════════════════
 
-async function initFallbackProxy(): Promise<void> {
-  if (!FALLBACK_PROXY_RUNTIME) { fallbackSlot = null; return; }
-  const lines = FALLBACK_PROXY_RUNTIME.split(',').map(s => s.trim()).filter(Boolean);
-  let anyReady = false;
-  for (const line of lines) {
-    try {
-      let isSocks = line.startsWith('socks5://') || line.startsWith('socks5h://');
-      // 保留完整地址（含认证信息）用于构建代理 URL
-      const fullAddr = line.replace(/^https?:\/\//, '').replace(/^socks5h?:\/\//, '');
-      // 去掉认证信息 user:pass@ 得到纯 ip:port
-      const cleanAddr = fullAddr.replace(/^[^@]+@/, '');
-      const proxyItem: ProxyItem = { address: cleanAddr, fullAddr: fullAddr, protocol: isSocks ? 'socks5' : 'http', latency: 999, quality_grade: 'F' };
-      // Fallback 用更长探活超时（15s），goproxy 延迟 4-6s 常见，8s 太紧
-      const r = await probeWithTimeout(proxyItem, 15000);
-      if (r.ok) {
-        const url = isSocks ? `socks5h://${fullAddr}` : `http://${fullAddr}`;
-        fallbackSlot = { addr: cleanAddr, url, proto: isSocks ? 'socks5' : 'http', latencyMs: r.latencyMs, qualityGrade: 'F' };
-        anyReady = true;
-        console.log(`[Fallback+] ${cleanAddr} (${r.latencyMs}ms) 就绪`);
-      } else {
-        console.warn(`[Fallback] ${cleanAddr} 探活失败，将跳过`);
-      }
-    } catch (e: any) {
-      console.warn(`[Fallback] ${line} 异常: ${e.message}`);
-    }
-  }
-  if (!anyReady) {
-    console.warn('[Fallback] 未就绪，将由定时任务持续重试');
-  }
-}
-
-// ═══════════════════════════════════════════════════════════
-//  候选池（代理列表聚合）
-// ═══════════════════════════════════════════════════════════
-
-async function fetchSource(source: typeof DEFAULT_SOURCES[0]): Promise<ProxyItem[]> {
-  const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), 15000);
+function loadSingboxNodes() {
   try {
-    if (source.no_warp) {
-      // no_warp 源跳过 WARP，直连拉取（如 scdn 被 WARP 出口屏蔽）
-      const res = await fetch(source.url, { signal: ctl.signal });
-      if (!res.ok) { console.warn(`[源][${source.name}] HTTP ${res.status}`); return []; }
-      const raw = source.type === 'json' ? await res.json() : await res.text();
-      const items = source.parser(raw);
-      if (items.length === 0) { console.warn(`[源][${source.name}] 空列表`); return []; }
-      console.log(`[源][${source.name}] ${items.length} 个代理`);
-      return items;
-    } else if (warpModeRuntime === 'on' && warpSlot) {
-      const agent = new SocksProxyAgent(warpSlot.url, { timeout: 10000 }) as unknown as https.Agent;
-      const body = await new Promise<string>((resolve, reject) => {
-        const httpMod = source.url.startsWith('https://') ? https : http;
-        const req = httpMod.request(source.url, {
-          method: 'GET',
-          headers: { 'user-agent': 'Mozilla/5.0' },
-          agent,
-          rejectUnauthorized: false,
-          timeout: 10000,
-        }, (res) => {
-          const chunks: Buffer[] = [];
-          res.on('data', (c: Buffer) => chunks.push(c));
-          res.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
-          res.on('error', reject);
-        });
-        req.on('error', reject);
-        req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+    const nodesFile = path.join(SINGBOX_CONFIG_DIR, 'nodes.json');
+    if (!fs.existsSync(nodesFile)) {
+      singboxNodes = [];
+      singboxNodeIndex = 0;
+      return;
+    }
+    const data = JSON.parse(fs.readFileSync(nodesFile, 'utf-8'));
+    singboxNodes = data.nodes || [];
+    singboxNodeIndex = 0;
+    console.log(`[SingBox] 已加载 ${singboxNodes.length} 个节点`);
+  } catch (e: any) {
+    console.error(`[SingBox] 加载节点失败: ${e.message}`);
+    singboxNodes = [];
+  }
+}
+
+async function initSingboxNode(): Promise<void> {
+  if (singboxNodes.length === 0) return;
+  const {SocksProxyAgent} = await import('socks-proxy-agent');
+  const httpsMod = await import('node:https');
+  // 逐个测试节点，找到第一个能连 opencode.ai 的
+  const getRes = await fetch(`${SINGBOX_API_URL}/proxies/manual`, { signal: AbortSignal.timeout(3000) }).catch(() => null);
+  const all = getRes && getRes.ok ? (await getRes.json() as any).all || [] : singboxNodes;
+  const maxTest = Math.min(all.length, 60);
+  for (let i = 0; i < maxTest; i++) {
+    const node = all[i];
+    try {
+      await fetch(`${SINGBOX_API_URL}/proxies/manual`, {
+        method: 'PUT', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: node }),
+        signal: AbortSignal.timeout(3000),
+      });
+      await new Promise(r => setTimeout(r, 150));
+    } catch {}
+    const agent = new SocksProxyAgent(`socks5h://${SINGBOX_HOST}:${SINGBOX_SOCKS_PORT}`, { timeout: 8000 }) as unknown as https.Agent;
+    try {
+      const ok = await new Promise<boolean>((resolve) => {
+        const req = httpsMod.request('https://opencode.ai/zen/v1/models', {
+          headers: { 'authorization': 'Bearer public', 'x-opencode-client': 'desktop' },
+          agent, rejectUnauthorized: false, signal: AbortSignal.timeout(6000),
+        }, (r) => { resolve(r.statusCode === 200); });
+        req.on('error', () => resolve(false));
         req.end();
       });
-      const raw = source.type === 'json' ? JSON.parse(body) : body;
-      const items = source.parser(raw);
-      if (items.length === 0) { console.warn(`[源][${source.name}] 空列表`); return []; }
-      console.log(`[源][${source.name}] ${items.length} 个代理`);
-      return items;
-    } else {
-      const res = await fetch(source.url, { signal: ctl.signal });
-      if (!res.ok) { console.warn(`[源][${source.name}] HTTP ${res.status}`); return []; }
-      const raw = source.type === 'json' ? await res.json() : await res.text();
-      const items = source.parser(raw);
-      if (items.length === 0) { console.warn(`[源][${source.name}] 空列表`); return []; }
-      console.log(`[源][${source.name}] ${items.length} 个代理`);
-      return items;
-    }
-  } catch (e: any) {
-    console.warn(`[源][${source.name}] 失败: ${e.message}`);
-    return [];
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-// 每个源原始（去重前）数量
-let sourceCounts: Record<string, number> = {};
-
-async function loadCandidates(): Promise<void> {
-  const seen = new Set<string>();
-  const all: ProxyItem[] = [];
-  const newCounts: Record<string, number> = {};
-  const results = await Promise.allSettled(proxySources.map(async (s) => {
-    const items = await fetchSource(s);
-    newCounts[s.name] = items.length;
-    return items;
-  }));
-  for (const r of results) {
-    if (r.status === 'fulfilled') {
-      for (const item of r.value) {
-        const key = `${item.protocol}://${item.address}`;
-        if (!seen.has(key)) { seen.add(key); all.push(item); }
-      }
-    }
-  }
-  sourceCounts = newCounts;
-  // 合并自定义持久化代理（使用 cleanAddr 作为 key）
-  for (const item of customProxyItems) {
-    const key = `${item.protocol}://${item.address}`;
-    if (!seen.has(key)) { seen.add(key); all.push(item); }
-  }
-  const gradeOrder: Record<string, number> = { S: 0, A: 1, B: 2, C: 3 };
-  all.sort((a, b) => {
-    const ga = gradeOrder[a.quality_grade] ?? 99;
-    const gb = gradeOrder[b.quality_grade] ?? 99;
-    if (ga !== gb) return ga - gb;
-    return (a.latency || 999) - (b.latency || 999);
-  });
-  const oldLocked = new Map<string, string>();
-  for (const c of candidates) { if (c.lockedBy) oldLocked.set(c.address, c.lockedBy); }
-  candidates = all.map(item => ({
-    ...item,
-    lockedBy: oldLocked.get(item.address) || null,
-  }));
-  const srcCount = proxySources.length;
-  console.log(`[选] 聚合 ${srcCount} 个源`, customProxyItems.length > 0 ? `+ ${customProxyItems.length} 个自定义` : '', `共 ${candidates.length} 个候选`);
-}
-
-// ═══════════════════════════════════════════════════════════
-//  TCP 快速测活（前置）
-// ═══════════════════════════════════════════════════════════
-
-function tcpCheck(address: string, timeoutMs: number): Promise<boolean> {
-  return new Promise((resolve) => {
-    // address may be "ip:port" or "user:pass@ip:port"
-    const atIdx = address.lastIndexOf('@');
-    const cleanAddr = atIdx >= 0 ? address.substring(atIdx + 1) : address;
-    const [ip, portStr] = cleanAddr.split(':');
-    const port = parseInt(portStr, 10);
-    if (isNaN(port) || !ip) { resolve(false); return; }
-    const net = require('net') as typeof import('net');
-    const sock = new net.Socket();
-    const timer = setTimeout(() => { sock.destroy(); resolve(false); }, timeoutMs);
-    sock.on('connect', () => { clearTimeout(timer); sock.destroy(); resolve(true); });
-    sock.on('error', () => { clearTimeout(timer); resolve(false); });
-    sock.connect(port, ip);
-  });
-}
-
-async function fastTcpProbe(address: string, protocol: string): Promise<{ ok: boolean; latencyMs: number }> {
-  const start = Date.now();
-  const ok = await tcpCheck(address, TCP_FAST_CHECK_TIMEOUT);
-  return { ok, latencyMs: Date.now() - start };
-}
-
-// ═══════════════════════════════════════════════════════════
-//  探活
-// ═══════════════════════════════════════════════════════════
-
-function makeAgent(url: string, proto: 'http' | 'socks5'): https.Agent | undefined {
-  return getCachedAgent(url, proto) as https.Agent | undefined;
-}
-
-async function probe(item: ProxyItem): Promise<{ ok: boolean; latencyMs: number }> {
-  const addr = item.fullAddr || item.address;
-  const url = item.protocol === 'socks5' ? `socks5h://${addr}` : `http://${addr}`;
-  const agent = makeAgent(url, item.protocol as 'http' | 'socks5');
-  const start = Date.now();
-  try {
-    const result = await new Promise<{ ok: boolean }>((resolve) => {
-      const req = https.request(`${UPSTREAM}/v1/models`, {
-        method: 'GET',
-        headers: { accept: 'application/json', authorization: 'Bearer ' },
-        agent,
-        rejectUnauthorized: false,
-        timeout: PROXY_PROBE_TIMEOUT,
-      }, (res) => {
-        res.on('data', () => {});
-        res.on('end', () => resolve({ ok: res.statusCode! >= 200 && res.statusCode! < 400 }));
-      });
-      req.on('error', () => resolve({ ok: false }));
-      req.on('timeout', () => { req.destroy(); resolve({ ok: false }); });
-      req.end();
-    });
-    return { ok: result.ok, latencyMs: Date.now() - start };
-  } catch {
-    return { ok: false, latencyMs: Date.now() - start };
-  } finally {
-    // preserved
-  }
-}
-
-// Fallback 专用探活：超时可调（默认 PROXY_PROBE_TIMEOUT）
-async function probeWithTimeout(item: ProxyItem, timeoutMs?: number): Promise<{ ok: boolean; latencyMs: number }> {
-  const addr = item.fullAddr || item.address;
-  const url = item.protocol === 'socks5' ? `socks5h://${addr}` : `http://${addr}`;
-  const agent = makeAgent(url, item.protocol as 'http' | 'socks5');
-  const start = Date.now();
-  try {
-    const result = await new Promise<{ ok: boolean }>((resolve) => {
-      const req = https.request(`${UPSTREAM}/v1/models`, {
-        method: 'GET',
-        headers: { accept: 'application/json', authorization: 'Bearer ' },
-        agent,
-        rejectUnauthorized: false,
-        timeout: timeoutMs || PROXY_PROBE_TIMEOUT,
-      }, (res) => {
-        res.on('data', () => {});
-        res.on('end', () => resolve({ ok: res.statusCode! >= 200 && res.statusCode! < 400 }));
-      });
-      req.on('error', () => resolve({ ok: false }));
-      req.on('timeout', () => { req.destroy(); resolve({ ok: false }); });
-      req.end();
-    });
-    return { ok: result.ok, latencyMs: Date.now() - start };
-  } catch {
-    return { ok: false, latencyMs: Date.now() - start };
-  } finally {
-    // preserved
-  }
-}
-
-function getWarpAddr(): string { return `${warpHostRuntime}:${warpPortRuntime}`; }
-function getWarpUrl(): string { return `socks5h://${warpHostRuntime}:${warpPortRuntime}`; }
-
-async function probeWarp(): Promise<boolean> {
-  if (warpModeRuntime !== 'on') return false;
-  const warpAddr = getWarpAddr();
-  const warpUrl = getWarpUrl();
-  try {
-    const agent = new SocksProxyAgent(warpUrl, { timeout: 5000 }) as unknown as https.Agent;
-    const start = Date.now();
-    const result = await new Promise<{ ok: boolean }>((resolve) => {
-      const req = https.request(`${UPSTREAM}/v1/models`, {
-        method: 'GET',
-        headers: { accept: 'application/json', authorization: 'Bearer ' },
-        agent,
-        rejectUnauthorized: false,
-        timeout: 5000,
-      }, (res) => {
-        res.on('data', () => {});
-        res.on('end', () => resolve({ ok: res.statusCode! >= 200 && res.statusCode! < 400 }));
-      });
-      req.on('error', () => resolve({ ok: false }));
-      req.on('timeout', () => { req.destroy(); resolve({ ok: false }); });
-      req.end();
-    });
-    const latency = Date.now() - start;
-    if (result.ok) {
-      warpStatus = 'running';
-      warpSlot = { addr: warpAddr, url: warpUrl, proto: 'socks5', latencyMs: latency, qualityGrade: 'S' };
-      console.log(`[WARP] 探活成功 (${latency}ms), 全局 fallback 就绪`);
-      return true;
-    }
-    warpStatus = 'stopped';
-    warpSlot = null;
-    return false;
-  } catch {
-    warpStatus = 'stopped';
-    warpSlot = null;
-    return false;
-  }
-}
-
-// ═══════════════════════════════════════════════════════════
-//  Per-Key Slot Pool 管理
-// ═══════════════════════════════════════════════════════════
-
-async function allocateKeySlots(keyId: string): Promise<KeySlotPool | null> {
-  if (keySlotPools.size >= MAX_ACTIVE_KEYS && !keySlotPools.has(keyId)) {
-    console.log(`[分配] 活跃 Key 数已达上限 ${MAX_ACTIVE_KEYS}，拒绝分配 Key ${keyId.slice(0, 7)}...`);
-    return null;
-  }
-  if (candidates.filter(c => !c.lockedBy).length < SLOTS_PER_KEY) {
-    await loadCandidates();
-  }
-  const usedAddrs = new Set<string>();
-  const existingPool = keySlotPools.get(keyId);
-  if (existingPool) { for (const s of existingPool.slots) usedAddrs.add(s.addr); }
-
-  const available = candidates.filter(c => !c.lockedBy && !usedAddrs.has(c.address));
-  const gradeOrder: Record<string, number> = { S: 0, A: 1, B: 2, C: 3 };
-  available.sort((a, b) => {
-    const ga = gradeOrder[a.quality_grade] ?? 99;
-    const gb = gradeOrder[b.quality_grade] ?? 99;
-    if (ga !== gb) return ga - gb;
-    // Known-good boost: recently verified proxies first
-    const ka = knownGoodProxies.get(a.address)?.lastOk || 0;
-    const kb = knownGoodProxies.get(b.address)?.lastOk || 0;
-    if (ka !== kb) return kb - ka;
-    return (a.latency || 999) - (b.latency || 999);
-  });
-
-  const batch = available.slice(0, PROBE_BATCH_SIZE);
-  if (batch.length === 0) {
-    if (warpSlot) {
-      const newPool: KeySlotPool = { keyId, slots: [warpSlot], rrCursor: 0, lastUsedAt: Date.now() };
-      console.log(`[分配] Key ${keyId.slice(0, 7)}... 无可用候选，仅使用 WARP fallback`);
-      return newPool;
-    }
-    console.log(`[分配] Key ${keyId.slice(0, 7)}... 无可用候选且无 WARP，分配失败`);
-    return null;
-  }
-
-  const probeResults = await Promise.all(batch.map(async (item) => {
-    const r = await probe(item);
-    return { item, ...r };
-  }));
-
-  const newSlots: Slot[] = [];
-  for (const r of probeResults) {
-    if (newSlots.length >= SLOTS_PER_KEY) break;
-    if (!r.ok) continue;
-    const url = r.item.protocol === 'socks5' ? `socks5h://${r.item.address}` : `http://${r.item.address}`;
-    const slot: Slot = {
-      addr: r.item.address, url,
-      proto: r.item.protocol as 'http' | 'socks5',
-      latencyMs: r.latencyMs || 0,
-      qualityGrade: r.item.quality_grade || 'C',
-    };
-    newSlots.push(slot);
-    const cand = candidates.find(c => c.address === r.item.address);
-    if (cand) cand.lockedBy = keyId;
-    console.log(`[分配+] ${r.item.address} (${r.latencyMs}ms) → Key ${keyId.slice(0, 7)}...`);
-  }
-
-  if (warpModeRuntime === 'on' && !warpSlot) { await probeWarp(); }
-
-  if (newSlots.length === 0) {
-    if (warpSlot) {
-      const newPool: KeySlotPool = { keyId, slots: [warpSlot], rrCursor: 0, lastUsedAt: Date.now() };
-      console.log(`[分配] Key ${keyId.slice(0, 7)}... 候选全部失败，使用 WARP fallback`);
-      return newPool;
-    }
-    console.log(`[分配] Key ${keyId.slice(0, 7)}... 候选全部失败且无 WARP，分配失败`);
-    return null;
-  }
-
-  const newPool: KeySlotPool = { keyId, slots: newSlots, rrCursor: 0, lastUsedAt: Date.now() };
-  console.log(`[分配] Key ${keyId.slice(0, 7)}... 获得 ${newSlots.length} 个 slot`);
-  return newPool;
-}
-
-function releaseKeySlots(keyId: string): void {
-  const pool = keySlotPools.get(keyId);
-  if (!pool) return;
-  for (const slot of pool.slots) {
-    const cand = candidates.find(c => c.address === slot.addr);
-    if (cand) cand.lockedBy = null;
-  }
-  const count = pool.slots.length;
-  keySlotPools.delete(keyId);
-  console.log(`[释放] Key ${keyId.slice(0,7)}... 释放 ${count} 个 slot`);
-}
-
-function replaceFailedSlot(pool: KeySlotPool, failedAddr: string): void {
-  // Track failure -- only release after 2+ consecutive failures
-  trackSlotResult(failedAddr, false);
-  const entry = slotFailureTracker.get(failedAddr);
-  if (entry && entry.consecutiveFailures < 2) {
-    console.log(`[替换] ${failedAddr} 首次失败，保留slot观察 (连续失败 ${entry.consecutiveFailures})`);
-    return;
-  }
-  slotFailureTracker.delete(failedAddr);
-  const idx = pool.slots.findIndex(s => s.addr === failedAddr);
-  if (idx >= 0) pool.slots.splice(idx, 1);
-  const failedCand = candidates.find(c => c.address === failedAddr);
-  if (failedCand) {
-    failedCand.lockedBy = null;
-    // 放入备用候选池
-    addReleasedCandidate(failedCand);
-  }
-
-  const lockedAddrs = new Set(pool.slots.map(s => s.addr));
-  const replacement = candidates.find(c => !c.lockedBy && !lockedAddrs.has(c.address));
-  if (!replacement) {
-    // 如果活跃候选池没有，从备用池尝试提拔
-    const backupReplacement = releasedCandidates.find(r => r.consecutiveSuccesses >= 2 && !pool.slots.some(s => s.addr === r.address));
-    if (backupReplacement) {
-      probe(backupReplacement).then(r => {
-        if (r.ok) {
-          const url = backupReplacement.protocol === 'socks5' ? `socks5h://${backupReplacement.address}` : `http://${backupReplacement.address}`;
-          const newSlot: Slot = {
-            addr: backupReplacement.address, url,
-            proto: backupReplacement.protocol as 'http' | 'socks5',
-            latencyMs: r.latencyMs || 0,
-            qualityGrade: backupReplacement.quality_grade || 'C',
-          };
-          pool.slots.push(newSlot);
-          console.log(`[替换+] ${backupReplacement.address} (${r.latencyMs}ms) → Key ${pool.keyId.slice(0, 7)}... (来自备用池)`);
-        } else {
-          console.log(`[替换] ${backupReplacement.address} 探活失败`);
-        }
-      }).catch(e => {
-        console.error(`[替换] ${backupReplacement.address} 异常: ${e.message}`);
-      });
-    }
-    console.log(`[替换] ${failedAddr} 无可用候选替换 (pool 剩余 ${pool.slots.length})`);
-    return;
-  }
-
-  probe(replacement).then(r => {
-    if (r.ok) {
-      const url = replacement.protocol === 'socks5' ? `socks5h://${replacement.address}` : `http://${replacement.address}`;
-      const newSlot: Slot = {
-        addr: replacement.address, url,
-        proto: replacement.protocol as 'http' | 'socks5',
-        latencyMs: r.latencyMs || 0,
-        qualityGrade: replacement.quality_grade || 'C',
-      };
-      pool.slots.push(newSlot);
-      replacement.lockedBy = pool.keyId;
-      console.log(`[替换+] ${replacement.address} (${r.latencyMs}ms) → Key ${pool.keyId.slice(0, 7)}...`);
-    } else {
-      console.log(`[替换] ${replacement.address} 探活失败，未替换`);
-    }
-  }).catch(e => {
-    console.error(`[替换] ${replacement.address} 异常: ${e.message}`);
-  });
-}
-
-async function getKeySlotPool(keyId: string): Promise<KeySlotPool | null> {
-  const existing = keySlotPools.get(keyId);
-  if (existing) { existing.lastUsedAt = Date.now(); return existing; }
-  const pool = await allocateKeySlots(keyId);
-  if (!pool) return null;
-  keySlotPools.set(keyId, pool);
-  return pool;
-}
-
-// ═══════════════════════════════════════════════════════════
-//  定期刷新候选 + WARP 健康检查
-// ═══════════════════════════════════════════════════════════
-
-async function refreshCandidates(): Promise<void> {
-  if (refreshing) return;
-  refreshing = true;
-  try {
-    await loadCandidates();
-    // 释放的候选重新加入活跃池
-    await rePromoteReleasedCandidates();
-    if (warpModeRuntime === 'on') {
-      const warpOk = await probeWarp();
-      if (!warpOk && warpStatus === 'running') {
-        warpStatus = 'stopped';
-        console.log(`[WARP] 连接断开，全局 fallback 已移除`);
-      }
-    }
-  } catch (e: any) {
-    console.error('[刷新] error:', e.message);
-  } finally {
-    refreshing = false;
-  }
-}
-
-// ═══════════════════════════════════════════════════════════
-//  备用候选池定期测活
-// ═══════════════════════════════════════════════════════════
-
-async function rePromoteReleasedCandidates(): Promise<void> {
-  const now = Date.now();
-  for (const rc of releasedCandidates) {
-    try {
-      const proxyItem: ProxyItem = { address: rc.address, protocol: rc.protocol, latency: 999, quality_grade: rc.quality_grade };
-      const r = await probe(proxyItem);
-      if (r.ok) {
-        rc.consecutiveSuccesses++;
-        rc.lastSucceededAt = now;
-        rc.consecutiveFailures = 0;
-        console.log(`[备用池+] ${rc.address} 测活成功 (${r.latencyMs}ms)`);
-        if (rc.consecutiveSuccesses >= 2) {
-          // 连续成功，重新加入活跃候选池
-          const existing = candidates.find(c => c.address === rc.address);
-          if (!existing) {
-            candidates.push({
-              address: rc.address,
-              protocol: rc.protocol,
-              latency: r.latencyMs,
-              quality_grade: rc.quality_grade,
-              lockedBy: null,
-            });
-            console.log(`[备用池→活跃] ${rc.address} 已重新加入候选池`);
-          }
-        }
-      } else {
-        rc.consecutiveFailures++;
-        rc.consecutiveSuccesses = 0;
+      if (ok) {
+        singboxOk = true;
+        console.log(`[SingBox] 初始化到可用节点: ${node} (index ${i}/${all.length})`);
+        return;
       }
     } catch {}
   }
-  saveReleasedCandidates();
+  singboxOk = false;
+  console.warn('[SingBox] 前 60 个节点均不可用，将回退直连');
+}
+
+async function checkSingboxHealth(): Promise<boolean> {
+  if (SINGBOX_MODE !== 'on') { singboxOk = false; return false; }
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
+    const res = await fetch(`${SINGBOX_API_URL}/proxies`, { signal: controller.signal });
+    clearTimeout(timer);
+    singboxOk = res.ok;
+    return res.ok;
+  } catch {
+    singboxOk = false;
+    return false;
+  }
+}
+
+async function switchSingboxNode(tried: Set<string> = new Set()): Promise<string | null> {
+  if (SINGBOX_MODE !== 'on') return null;
+  try {
+    // 获取 manual selector 的全部节点和当前选中
+    const getRes = await fetch(`${SINGBOX_API_URL}/proxies/manual`, { signal: AbortSignal.timeout(3000) });
+    if (!getRes.ok) return null;
+    const data = await getRes.json() as any;
+    const all = data.all || [];
+    const now = data.now || '';
+    if (all.length === 0) return null;
+    // 顺序找下一个未尝试的节点
+    const startIdx = all.indexOf(now);
+    for (let i = 1; i <= all.length; i++) {
+      const idx = (startIdx + i) % all.length;
+      const node = all[idx];
+      if (tried.has(node)) continue;
+      const putRes = await fetch(`${SINGBOX_API_URL}/proxies/manual`, {
+        method: 'PUT', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: node }),
+        signal: AbortSignal.timeout(3000),
+      });
+      if (putRes.ok) {
+        console.log(`[SingBox] 切换节点 → ${node} (${idx}/${all.length})`);
+        return node;
+      }
+    }
+    return null;
+  } catch (e: any) {
+    console.warn(`[SingBox] 切换节点异常: ${e.message}`);
+    return null;
+  }
+}
+
+async function reloadSingboxConfig(): Promise<boolean> {
+  if (SINGBOX_MODE !== 'on') return false;
+  try {
+    // 通过 Docker socket 重启 opengate-singbox 容器
+    const sockPath = '/var/run/docker.sock';
+    if (!fs.existsSync(sockPath)) {
+      console.warn('[SingBox] Docker socket 不可用，跳过重载');
+      return false;
+    }
+    await new Promise<void>((resolve, reject) => {
+      const client = net.createConnection(sockPath, () => {
+        client.write(
+          'POST /containers/opengate-singbox/restart HTTP/1.1\r\n' +
+          'Host: localhost\r\n' +
+          'Content-Length: 0\r\n' +
+          '\r\n'
+        );
+      });
+      let resp = '';
+      client.on('data', (chunk) => { resp += chunk.toString(); });
+      client.on('end', () => {
+        if (resp.includes('204') || resp.includes('200')) resolve();
+        else reject(new Error(resp.split('\r\n')[0]));
+      });
+      client.on('error', reject);
+      client.setTimeout(10000, () => { client.destroy(); reject(new Error('timeout')); });
+    });
+    console.log('[SingBox] 配置已重载，容器已重启');
+    // 等待 sing-box 启动
+    await new Promise(resolve => setTimeout(resolve, 3000));
+    await checkSingboxHealth();
+    loadSingboxNodes();
+    return true;
+  } catch (e: any) {
+    console.error(`[SingBox] 重载失败: ${e.message}`);
+    return false;
+  }
 }
 
 // ═══════════════════════════════════════════════════════════
-//  请求转发（doHttps / doHttpsStream）
+//  订阅管理
+// ═══════════════════════════════════════════════════════════
+
+interface SubscriptionConfig {
+  url: string;
+  token: string;
+  updatedAt: number;
+}
+
+function loadSubscription(): SubscriptionConfig | null {
+  try {
+    if (!fs.existsSync(SUBSCRIPTION_FILE)) return null;
+    return JSON.parse(fs.readFileSync(SUBSCRIPTION_FILE, 'utf-8'));
+  } catch { return null; }
+}
+
+function saveSubscription(sub: SubscriptionConfig) {
+  fs.writeFileSync(SUBSCRIPTION_FILE, JSON.stringify(sub, null, 2), 'utf-8');
+}
+
+// 生成 sing-box 配置（复用 glm-proxy 的 vless 解析逻辑）
+async function generateSingboxConfig(sub: SubscriptionConfig): Promise<number> {
+  // 拉取订阅
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30000);
+  let raw: string;
+  try {
+    const res = await fetch(sub.url, {
+      headers: { 'user-agent': 'curl/8.0' },
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new Error(`订阅拉取失败 HTTP ${res.status}`);
+    raw = await res.text();
+  } catch (e: any) {
+    clearTimeout(timer);
+    throw new Error(`订阅拉取异常: ${e.message}`);
+  }
+  clearTimeout(timer);
+
+  // base64 解码
+  let decoded = '';
+  try {
+    const normalized = raw.replace(/\s+/g, '');
+    decoded = Buffer.from(normalized, 'base64').toString('utf-8');
+    if (!decoded.trim().startsWith('vless://')) throw new Error('not vless');
+  } catch {
+    decoded = raw;
+  }
+
+  // 解析 vless:// 行
+  const lines = decoded.split('\n').map(l => l.trim()).filter(Boolean);
+  let outbounds: any[] = [];
+  const seen = new Set<string>();
+  for (const line of lines) {
+    if (!line.startsWith('vless://')) continue;
+    const ob = parseVless(line);
+    if (ob && !seen.has(ob['tag'])) {
+      seen.add(ob['tag']);
+      outbounds.push(ob);
+    }
+  }
+  if (outbounds.length === 0) throw new Error('订阅中未解析到任何 vless 节点');
+
+  // 精简节点数量，降低 urltest 测速对上游/CF 配额的消耗（2026-08-11）
+  const MAX_SINGBOX_NODES = 50;
+  if (outbounds.length > MAX_SINGBOX_NODES) {
+    console.log(`[SingBox] 节点数 ${outbounds.length} 超过上限 ${MAX_SINGBOX_NODES}，精简中...`);
+    outbounds = outbounds.slice(0, MAX_SINGBOX_NODES);
+  }
+
+  const nodeTags = outbounds.map(o => o['tag']);
+  const config = {
+    log: { level: 'warn' as const, timestamp: true },
+    inbounds: [
+      { type: 'http' as const, tag: 'http-in', listen: '0.0.0.0', listen_port: SINGBOX_HTTP_PORT },
+      { type: 'socks' as const, tag: 'socks-in', listen: '0.0.0.0', listen_port: SINGBOX_SOCKS_PORT },
+    ],
+    outbounds: [
+      { type: 'selector' as const, tag: 'manual', outbounds: nodeTags, default: nodeTags[0] },
+      { type: 'urltest' as const, tag: 'auto', outbounds: nodeTags,
+        url: 'https://opencode.ai/zen/v1/models', interval: '40m', tolerance: 100, idle_timeout: '60m' },
+      ...outbounds,
+      { type: 'direct' as const, tag: 'direct' },
+      { type: 'block' as const, tag: 'block' },
+    ],
+    route: {
+      rules: [{ inbound: ['http-in', 'socks-in'], outbound: 'auto' }],
+      final: 'auto' as const,
+    },
+    experimental: {
+      clash_api: {
+        external_controller: `0.0.0.0:${SINGBOX_API_PORT}`,
+        external_ui: '',
+        secret: '',
+        default_mode: 'rule' as const,
+      },
+    },
+  };
+
+  fs.mkdirSync(SINGBOX_CONFIG_DIR, { recursive: true });
+  fs.writeFileSync(path.join(SINGBOX_CONFIG_DIR, 'singbox_config.json'), JSON.stringify(config, null, 2), 'utf-8');
+  fs.writeFileSync(path.join(SINGBOX_CONFIG_DIR, 'nodes.json'), JSON.stringify({ nodes: nodeTags, count: nodeTags.length }), 'utf-8');
+  return nodeTags.length;
+}
+
+function parseVless(uri: string): any {
+  const body = uri.slice('vless://'.length);
+  const withHash = body.split('#', 1)[0] || body;
+  const at = withHash.lastIndexOf('@');
+  if (at === -1) return null;
+  const uuid = withHash.slice(0, at);
+  let rest = withHash.slice(at + 1);
+  let query = '';
+  if (rest.includes('?')) { const i = rest.indexOf('?'); query = rest.slice(i + 1); rest = rest.slice(0, i); }
+  const params = Object.fromEntries(new URLSearchParams(query));
+  const hostPort = rest.split('?')[0];
+  const lastColon = hostPort.lastIndexOf(':');
+  const host = hostPort.slice(0, lastColon);
+  const port = parseInt(hostPort.slice(lastColon + 1), 10);
+  if (!host || isNaN(port)) return null;
+  return {
+    type: 'vless', tag: `n-${host}-${port}`,
+    server: host, server_port: port, uuid,
+    tls: {
+      enabled: params['security'] === 'tls',
+      server_name: params['sni'] || params['host'] || host,
+      utls: { enabled: true, fingerprint: params['fp'] || 'chrome' },
+    },
+    transport: { type: 'ws', path: params['path'] || '/', headers: { Host: params['host'] || host } },
+  };
+}
+
+// ═══════════════════════════════════════════════════════════
+//  Key 管理
+// ═══════════════════════════════════════════════════════════
+
+function loadKeys() {
+  try {
+    if (!fs.existsSync(KEYS_FILE)) {
+      apiKeys = {};
+      // 默认 key
+      const defaultKey = 'sk-default';
+      apiKeys[defaultKey] = {
+        key: defaultKey, name: 'default', enabled: true,
+        createdAt: Date.now(), lastUsedAt: 0,
+        totalRequests: 0, totalTokens: 0,
+        maxConcurrency: 5, maxRequests: 1000000,
+        requestCount: 0, expiresAt: Date.now() + 365 * 86400000,
+      };
+      saveKeys();
+      console.log('[Key] 默认 key 已创建');
+      return;
+    }
+    apiKeys = JSON.parse(fs.readFileSync(KEYS_FILE, 'utf-8'));
+    console.log(`[Key] 已加载 ${Object.keys(apiKeys).length} 个 key`);
+  } catch (e: any) {
+    console.error(`[Key] 加载失败: ${e.message}`);
+    apiKeys = {};
+  }
+}
+
+function saveKeys() {
+  try {
+    fs.writeFileSync(KEYS_FILE, JSON.stringify(apiKeys, null, 2), 'utf-8');
+  } catch (e: any) {
+    console.error(`[Key] 保存失败: ${e.message}`);
+  }
+}
+
+function validateKey(key: string): { valid: boolean; record?: ApiKeyRecord; reason?: string } {
+  const record = apiKeys[key];
+  if (!record) return { valid: false, reason: 'key 不存在' };
+  if (!record.enabled) return { valid: false, reason: 'key 已禁用' };
+  if (record.expiresAt !== 0 && Date.now() > record.expiresAt) return { valid: false, reason: 'key 已过期' };
+  if (record.maxRequests !== 0 && record.requestCount >= record.maxRequests) return { valid: false, reason: '请求次数已达上限' };
+  const current = activeRequests[key] || 0;
+  if (record.maxConcurrency !== 0 && current >= record.maxConcurrency) return { valid: false, reason: '并发数已达上限' };
+  return { valid: true, record };
+}
+
+function acquireKey(key: string) {
+  activeRequests[key] = (activeRequests[key] || 0) + 1;
+}
+
+function releaseKey(key: string) {
+  if (activeRequests[key] > 0) activeRequests[key]--;
+}
+
+function recordKeyUsage(key: string, tokens: number) {
+  const record = apiKeys[key];
+  if (record) {
+    record.totalRequests++;
+    record.totalTokens += tokens;
+    record.requestCount++;
+    record.lastUsedAt = Date.now();
+    saveKeys();
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+//  审计日志
+// ═══════════════════════════════════════════════════════════
+
+function audit(status: number, latencyMs: number, keyId: string, path: string, body?: string) {
+  let model = '';
+  let promptTokens = 0, completionTokens = 0, totalTokens = 0;
+  let cacheCreation = 0, cacheRead = 0;
+  try {
+    if (body) {
+      const parsed = JSON.parse(body);
+      model = parsed.model || '';
+      if (parsed.usage) {
+        promptTokens = parsed.usage.prompt_tokens || 0;
+        completionTokens = parsed.usage.completion_tokens || 0;
+        totalTokens = parsed.usage.total_tokens || 0;
+        cacheRead = parsed.usage.prompt_cache_hit_tokens || 0;
+      }
+    }
+  } catch {}
+  const entry: AuditEntry = {
+    ts: Date.now(), keyId, model, promptTokens, completionTokens, totalTokens,
+    cacheCreation, cacheRead, latencyMs, status,
+  };
+  auditLog.push(entry);
+  if (auditLog.length > MAX_AUDIT) auditLog.shift();
+  fs.appendFileSync(AUDIT_FILE, JSON.stringify(entry) + '\n');
+}
+
+function loadAuditLog() {
+  try {
+    if (!fs.existsSync(AUDIT_FILE)) return;
+    const lines = fs.readFileSync(AUDIT_FILE, 'utf-8').split('\n').filter(Boolean);
+    const count = Math.min(lines.length, 500);
+    for (let i = lines.length - count; i < lines.length; i++) {
+      try { auditLog.push(JSON.parse(lines[i])); } catch {}
+    }
+    if (auditLog.length > MAX_AUDIT) auditLog.splice(0, auditLog.length - MAX_AUDIT);
+    console.log(`[审计] 已加载 ${auditLog.length} 条历史记录`);
+  } catch (e: any) {
+    console.error(`[审计] 加载失败: ${e.message}`);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+//  模型缓存
+// ═══════════════════════════════════════════════════════════
+
+async function fetchModelsFromUpstream(): Promise<any[]> {
+  try {
+    const res = await fetch(`${UPSTREAM}/v1/models`, { signal: AbortSignal.timeout(10000) });
+    if (!res.ok) return [];
+    const data = await res.json() as any;
+    const models = data.data || data.models || [];
+    cachedModels = models;
+    cachedModelsTime = Date.now();
+    saveModelsCache();
+    return models;
+  } catch {
+    return cachedModels;
+  }
+}
+
+function saveModelsCache() {
+  try {
+    fs.writeFileSync(MODELS_CACHE_FILE, JSON.stringify({ models: cachedModels, time: cachedModelsTime }, null, 2), 'utf-8');
+  } catch {}
+}
+
+function loadModelsCache() {
+  try {
+    if (!fs.existsSync(MODELS_CACHE_FILE)) return false;
+    const data = JSON.parse(fs.readFileSync(MODELS_CACHE_FILE, 'utf-8'));
+    if (data.models) {
+      cachedModels = data.models;
+      cachedModelsTime = data.time || 0;
+      return true;
+    }
+    return false;
+  } catch { return false; }
+}
+
+// ═══════════════════════════════════════════════════════════
+//  转发（doHttps / doHttpsStream）
 // ═══════════════════════════════════════════════════════════
 
 function doHttps(
   path: string, method: string, headers: Record<string, string>,
   body: string | undefined, agent?: https.Agent,
 ): Promise<{ status: number; body: string }> {
-  // 上游要求 Authorization: Bearer 存在但值为空才走 IP 免费认证
-  const { authorization, Authorization, ...cleanHeaders } = headers;
-  cleanHeaders['authorization'] = 'Bearer ';
+  const { authorization, Authorization, host, Host, ...cleanHeaders } = headers;
+  cleanHeaders['authorization'] = 'Bearer public';
+  cleanHeaders['x-opencode-client'] = 'desktop';
+  delete cleanHeaders['content-length'];
+  delete cleanHeaders['transfer-encoding'];
+  delete cleanHeaders['connection'];
+  delete cleanHeaders['user-agent'];
+  delete cleanHeaders['accept-encoding'];
+  delete cleanHeaders['host'];
   return new Promise((resolve, reject) => {
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), TIMEOUT);
@@ -1187,8 +597,15 @@ function doHttpsStream(
   path: string, method: string, headers: Record<string, string>,
   body: string | undefined, agent?: https.Agent,
 ): Promise<{ status: number; stream: ReadableStream<Uint8Array>; headers: Record<string, string> }> {
-  const { authorization, Authorization, ...cleanHeaders } = headers;
-  cleanHeaders['authorization'] = 'Bearer ';
+  const { authorization, Authorization, host, Host, ...cleanHeaders } = headers;
+  cleanHeaders['authorization'] = 'Bearer public';
+  cleanHeaders['x-opencode-client'] = 'desktop';
+  delete cleanHeaders['content-length'];
+  delete cleanHeaders['transfer-encoding'];
+  delete cleanHeaders['connection'];
+  delete cleanHeaders['user-agent'];
+  delete cleanHeaders['accept-encoding'];
+  delete cleanHeaders['host'];
   return new Promise((resolve, reject) => {
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), STREAM_TIMEOUT);
@@ -1218,54 +635,30 @@ function doHttpsStream(
 }
 
 // ═══════════════════════════════════════════════════════════
-//  审计记录
+//  SingBox 出站调度
 // ═══════════════════════════════════════════════════════════
 
-function audit(status: number, latencyMs: number, slotAddr: string, path: string, body?: string, keyId?: string) {
-  let model = '';
-  let promptTokens = 0;
-  let completionTokens = 0;
-  let totalTokens = 0;
-  let cacheCreation = 0;
-  let cacheRead = 0;
+async function getSingboxAgent(): Promise<https.Agent | undefined> {
+  if (SINGBOX_MODE !== 'on' || !singboxOk) return undefined;
   try {
-    if (body) {
-      const parsed = JSON.parse(body);
-      model = parsed.model || '';
-      if (parsed.usage) {
-        promptTokens = parsed.usage.prompt_tokens || 0;
-        completionTokens = parsed.usage.completion_tokens || 0;
-        totalTokens = parsed.usage.total_tokens || 0;
-        cacheRead = parsed.usage.prompt_cache_hit_tokens || 0;
-      }
-    }
-  } catch {}
-  auditLog.push({
-    ts: Date.now(), keyId: keyId || 'unknown', model, promptTokens, completionTokens, totalTokens,
-    cacheCreation, cacheRead, latencyMs, status, slotAddr,
-  });
-  if (auditLog.length > MAX_AUDIT) auditLog.shift();
-  // 追加到持久化文件（异步流式写入）
-  auditBuffer.push(JSON.stringify({
-    ts: Date.now(), keyId: keyId || 'unknown', model, promptTokens, completionTokens, totalTokens,
-    cacheCreation, cacheRead, latencyMs, status, slotAddr,
-  }));
-  if (auditBuffer.length >= AUDIT_BATCH_SIZE) flushAudit();
+    const { SocksProxyAgent } = await import('socks-proxy-agent');
+    return new SocksProxyAgent(SINGBOX_SOCKS_URL, { timeout: TIMEOUT }) as unknown as https.Agent;
+  } catch {
+    return undefined;
+  }
 }
 
-function loadAuditLog() {
-  try {
-    if (!fs.existsSync(AUDIT_FILE)) return;
-    const lines = fs.readFileSync(AUDIT_FILE, 'utf-8').split('\n').filter(Boolean);
-    const count = Math.min(lines.length, 500);
-    for (let i = lines.length - count; i < lines.length; i++) {
-      try { auditLog.push(JSON.parse(lines[i])); } catch {}
-    }
-    if (auditLog.length > MAX_AUDIT) auditLog.splice(0, auditLog.length - MAX_AUDIT);
-    console.log(`[审计] 已加载 ${auditLog.length} 条历史记录`);
-  } catch (e: any) {
-    console.error(`[审计] 加载失败: ${e.message}`);
-  }
+// ═══════════════════════════════════════════════════════════
+//  主请求处理 dispatch
+// ═══════════════════════════════════════════════════════════
+
+// 判断是否需要走 sing-box 代理（排除本地直连路径）
+function shouldUseProxy(url: string | undefined): boolean {
+  if (SINGBOX_MODE !== 'on') return false;
+  if (!url) return true;
+  const directHosts = ['127.0.0.1', 'localhost', '192.168.', '10.', '172.16.', '172.17.', '172.18.', '172.19.'];
+  const host = (() => { try { return new URL(url).hostname; } catch { return url; } })();
+  return !directHosts.some(h => host.startsWith(h));
 }
 
 function extractUsageFromResponse(respBody: string): { tokens: number; model: string } {
@@ -1283,192 +676,225 @@ function extractUsageFromResponse(respBody: string): { tokens: number; model: st
   return { tokens: 0, model: '' };
 }
 
-// ═══════════════════════════════════════════════════════════
-//  核心 dispatch — Per-Key Pool 路由
-// ═══════════════════════════════════════════════════════════
-
-async function dispatch(
-  path: string, method: string, headers: Record<string, string>,
-  body: string | undefined, pool: KeySlotPool,
-  retry = 0, triedAddrs = new Set<string>(),
-): Promise<{ status: number; body?: string; stream?: ReadableStream<Uint8Array>; streamHeaders?: Record<string, string> }> {
-
-  // 请求体最小修复（借鉴 OCFreeRelay）：补 -free 后缀 + 剥 client_metadata + 限 tools 数
-  if (body && path.includes('/chat/completions')) {
+async function dispatchNonStream(
+  reqPath: string, reqMethod: string, reqHeaders: Record<string, string>,
+  reqBody: string, keyId: string,
+): Promise<{ status: number; body: string }> {
+  // 补 -free 后缀（兼容旧 opencode-gate 行为）
+  if (reqBody && reqPath.includes('/chat/completions')) {
     try {
-      const parsed = JSON.parse(body);
+      const parsed = JSON.parse(reqBody);
       if (parsed.model && !parsed.model.endsWith('-free')) {
         parsed.model = parsed.model + '-free';
       }
-      if ('client_metadata' in parsed) delete parsed.client_metadata; // 上游拒绝该字段
-      if (Array.isArray(parsed.tools) && parsed.tools.length > 128) {
-        parsed.tools = parsed.tools.slice(0, 128); // 上游 tools 上限保护
-      }
-      body = JSON.stringify(parsed);
+      reqBody = JSON.stringify(parsed);
     } catch {}
   }
-
-  // 选择 slot：粘性优先 + 冷却感知（借鉴 OCFreeRelay）
-  // 粘住光标指向的 ready slot（保住 prompt 缓存热度），除非冷却/已尝试才轮换
-  console.log(`[调度] 尝试 slot pool: ${pool.slots.map(s => s.addr + (s.cooldownUntil && s.cooldownUntil > Date.now() ? '(冷却)' : '')).join(', ')} | 已尝试: ${[...triedAddrs].join(', ') || '无'}`);
-  let selectedSlot: Slot | null = null;
-  const nowMs = Date.now();
-  const stickySlot = pool.slots[pool.rrCursor % pool.slots.length];
-  if (stickySlot && !triedAddrs.has(stickySlot.addr) && !(stickySlot.cooldownUntil && stickySlot.cooldownUntil > nowMs)) {
-    selectedSlot = stickySlot;
-  } else {
-    for (let i = 0; i < pool.slots.length; i++) {
-      const idx = (pool.rrCursor + i) % pool.slots.length;
-      const s = pool.slots[idx];
-      if (triedAddrs.has(s.addr)) continue;
-      if (s.cooldownUntil && s.cooldownUntil > nowMs) continue; // 冷却中跳过
-      selectedSlot = s;
-      pool.rrCursor = (idx + 1) % pool.slots.length;
-      break;
-    }
-  }
-
-  // 没有可用 slot → fallback 链
-  if (!selectedSlot) {
-    if (warpSlot && !triedAddrs.has(warpSlot.addr) && Date.now() >= warp429SkipUntil) {
-      console.log(`[调度] pool slot 耗尽, fallback → WARP`);
-      selectedSlot = warpSlot;
-    } else if (customSlots.length > 0) {
-      for (const cs of customSlots) {
-        if (!triedAddrs.has(cs.addr)) { selectedSlot = cs; break; }
-      }
-    }
-  }
-
-  if (!selectedSlot) {
-    // 自定义 Fallback 代理兜底
-    if (fallbackSlot && !triedAddrs.has(fallbackSlot.addr)) {
-      console.log(`[调度] all proxies failed, fallback → 自定义Fallback`);
-      selectedSlot = fallbackSlot;
-    }
-  }
-
-  if (!selectedSlot) {
-    // 直连兜底（zero-proxy mode）
-    console.log(`[调度] all proxies failed, fallback → 直连`);
+  let lastErr: any = null;
+  let directFallback = false;
+  const triedNodes = new Set<string>();
+  console.log(`[非流式] 开始请求 ${reqPath} singboxOk=${singboxOk} key=${keyId.slice(0,7)}`);
+  for (let attempt = 0; attempt < 20; attempt++) {
     const start = Date.now();
-    let agent: https.Agent | undefined;
+    let res: { status: number; body: string };
     try {
-      const isStream = path.includes('/messages') && (headers['accept'] === 'text/event-stream' || path.includes('stream'));
-      if (isStream) {
-        const result = await doHttpsStream(path, method, headers, body, undefined);
-        const latencyMs = Date.now() - start;
-        if (result.status >= 200 && result.status < 400) {
-          stats.total++; stats.success++;
-          audit(result.status, latencyMs, 'direct', path, body, pool.keyId);
-          return { status: result.status, stream: result.stream, streamHeaders: result.headers };
+      if (directFallback || !singboxOk) {
+        res = await doHttps(reqPath, reqMethod, reqHeaders, reqBody);
+      } else {
+        const agent = await getSingboxAgent();
+        if (agent) {
+          res = await doHttps(reqPath, reqMethod, reqHeaders, reqBody, agent);
+        } else {
+          res = await doHttps(reqPath, reqMethod, reqHeaders, reqBody);
         }
-        stats.total++; stats.errors++;
-        audit(result.status, latencyMs, 'direct', path, body, pool.keyId);
-        return { status: result.status, body: `{"error":"upstream_error"}` };
       }
-      const result = await doHttps(path, method, headers, body, undefined);
-      const latencyMs = Date.now() - start;
-      if (result.status >= 200 && result.status < 400) {
-        stats.total++; stats.success++;
-        const usage = extractUsageFromResponse(result.body);
-        if (usage.tokens > 0) recordKeyUsage(pool.keyId, usage.tokens);
-        audit(result.status, latencyMs, 'direct', path, result.body, pool.keyId);
-        return { status: result.status, body: result.body };
-      }
-      stats.total++; stats.errors++;
-      audit(result.status, latencyMs, 'direct', path, result.body, pool.keyId);
-      return { status: result.status, body: result.body };
     } catch (e: any) {
-      stats.total++; stats.errors++;
-      audit(502, Date.now() - start, 'direct', path, JSON.stringify({ error: e.message }), pool.keyId);
-      return { status: 502, body: JSON.stringify({ error: 'all_proxies_failed', message: '所有代理及直连均已失败' }) };
+      lastErr = e;
+      if (!directFallback && singboxOk) {
+        console.log(`[非流式] 代理连接异常，切换节点: ${e.message?.slice(0, 60) || e}`);
+        await switchSingboxNode(triedNodes);
+        continue;
+      }
+      stats.errors++;
+      const fb = JSON.stringify({ error: { message: `请求失败: ${e.message || '未知错误'}` } });
+      audit(502, 0, keyId, reqPath);
+      return { status: 502, body: fb };
     }
-  }
-
-  triedAddrs.add(selectedSlot.addr);
-  const agent = makeAgent(selectedSlot.url, selectedSlot.proto);
-  const start = Date.now();
-
-  try {
-    const isStream = path.includes('/messages') && (headers['accept'] === 'text/event-stream' || path.includes('stream'));
-    if (isStream) {
-      const result = await doHttpsStream(path, method, headers, body, agent);
-      const latencyMs = Date.now() - start;
-      if (result.status >= 200 && result.status < 400) {
-        stats.total++;
-        trackSlotResult(selectedSlot.addr, true);
-        markSlotSuccess(selectedSlot);
-        stats.success++;
-        console.log(`[调度] ${selectedSlot.addr} stream OK ${result.status} (${latencyMs}ms) pool=${pool.keyId.slice(0,7)}...`);
-        return { status: result.status, stream: result.stream, streamHeaders: result.headers };
+    const latency = Date.now() - start;
+    console.log(`[非流式] attempt ${attempt} 上游响应 ${res.status} (${latency}ms): ${res.body.slice(0,120)}`);
+    if (res.status === 429) {
+      stats.rateLimited++;
+      console.log(`[429] 上游限流，切换节点 (attempt ${attempt + 1})`);
+      if (singboxOk) {
+        try {
+          const r = await fetch(`${SINGBOX_API_URL}/proxies/manual`, { signal: AbortSignal.timeout(2000) });
+          if (r.ok) { const d = await r.json() as any; if (d.now) triedNodes.add(d.now); }
+        } catch {}
+        await switchSingboxNode(triedNodes);
       }
-      // 读取错误响应体
-      const reader = result.stream.getReader();
-      let errBody = '';
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        errBody += new TextDecoder().decode(value);
-      }
-      stats.total++;
-      if (result.status === 429) {
-        stats.rateLimited++;
-        handleRateLimit(selectedSlot.addr, selectedSlot === warpSlot);
-        markSlotCooldown(selectedSlot); // 429 → 指数退避冷却（保 slot 不删）
-      } else stats.errors++;
-      console.error(`[调度] ${selectedSlot.addr} stream ${result.status} (${latencyMs}ms) retry=${retry}`);
-      if (result.status >= 500) {
-        replaceFailedSlot(pool, selectedSlot.addr);
-      }
-      audit(result.status, latencyMs, selectedSlot.addr, path, errBody, pool.keyId);
-      if (retry < MAX_RETRIES) {
-        return dispatch(path, method, headers, body, pool, retry + 1, triedAddrs);
-      }
-      return { status: result.status, body: errBody };
-    } else {
-      const result = await doHttps(path, method, headers, body, agent);
-      const latencyMs = Date.now() - start;
-      if (result.status >= 200 && result.status < 400) {
-        stats.total++;
-        trackSlotResult(selectedSlot.addr, true);
-        markSlotSuccess(selectedSlot);
-        stats.success++;
-        const usage = extractUsageFromResponse(result.body);
-        if (usage.tokens > 0) recordKeyUsage(pool.keyId, usage.tokens);
-        console.log(`[调度] ${selectedSlot.addr} OK ${result.status} (${latencyMs}ms) pool=${pool.keyId.slice(0,7)}...`);
-        audit(result.status, latencyMs, selectedSlot.addr, path, result.body, pool.keyId);
-        return { status: result.status, body: result.body };
-      }
-      stats.total++;
-      if (result.status === 429) {
-        stats.rateLimited++;
-        handleRateLimit(selectedSlot.addr, selectedSlot === warpSlot);
-        markSlotCooldown(selectedSlot); // 429 → 指数退避冷却（保 slot 不删）
-      } else stats.errors++;
-      console.error(`[调度] ${selectedSlot.addr} ${result.status} (${latencyMs}ms) retry=${retry}`);
-      if (result.status >= 500) {
-        replaceFailedSlot(pool, selectedSlot.addr);
-      }
-      audit(result.status, latencyMs, selectedSlot.addr, path, result.body, pool.keyId);
-      if (retry < MAX_RETRIES) {
-        return dispatch(path, method, headers, body, pool, retry + 1, triedAddrs);
-      }
-      return { status: result.status, body: result.body };
+      if (attempt >= 5) directFallback = true;
+      continue;
     }
-  } catch (e: any) {
+    if (res.status >= 200 && res.status < 300) stats.success++;
+    else if (res.status >= 500) {
+      stats.errors++;
+      // 500 是上游内部错误，切换节点没用，直接兜底直连
+      directFallback = true;
+      continue;
+    }
     stats.total++;
-    stats.errors++;
-    console.error(`[调度] ${selectedSlot.addr} 异常: ${e.message} retry=${retry}`);
-    markSlotCooldown(selectedSlot);
-    replaceFailedSlot(pool, selectedSlot.addr);
-    audit(502, Date.now() - start, selectedSlot.addr, path, JSON.stringify({ error: e.message }), pool.keyId);
-    if (retry < MAX_RETRIES) {
-      return dispatch(path, method, headers, body, pool, retry + 1, triedAddrs);
+    audit(res.status, latency, keyId, reqPath, res.body);
+    return res;
+  }
+  // 直连兜底
+  try {
+    const finalRes = await doHttps(reqPath, reqMethod, reqHeaders, reqBody);
+    stats.total++;
+    audit(finalRes.status, 0, keyId, reqPath, finalRes.body);
+    return finalRes;
+  } catch (e: any) {
+    lastErr = e;
+  }
+  stats.errors++;
+  const fb = JSON.stringify({ error: { message: `上游请求失败: ${lastErr?.message || '未知错误'}` } });
+  audit(502, 0, keyId, reqPath);
+  return { status: 502, body: fb };
+}async function dispatchStream(
+  reqPath: string, reqMethod: string, reqHeaders: Record<string, string>,
+  reqBody: string, keyId: string,
+): Promise<{ status: number; stream: ReadableStream<Uint8Array>; headers: Record<string, string> }> {
+  // 补 -free 后缀（兼容旧 opencode-gate 行为，与非流式一致）
+  if (reqBody && reqPath.includes('/chat/completions')) {
+    try {
+      const parsed = JSON.parse(reqBody);
+      if (parsed.model && !parsed.model.endsWith('-free')) {
+        parsed.model = parsed.model + '-free';
+      }
+      reqBody = JSON.stringify(parsed);
+    } catch {}
+  }
+  let lastErr: any = null;
+  let directFallback = false;
+  const triedNodes = new Set<string>();
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const start = Date.now();
+    let res: { status: number; stream: ReadableStream<Uint8Array>; headers: Record<string, string> };
+    try {
+      if (directFallback || !singboxOk) {
+        res = await doHttpsStream(reqPath, reqMethod, reqHeaders, reqBody);
+      } else {
+        const agent = await getSingboxAgent();
+        if (agent) {
+          res = await doHttpsStream(reqPath, reqMethod, reqHeaders, reqBody, agent);
+        } else {
+          res = await doHttpsStream(reqPath, reqMethod, reqHeaders, reqBody);
+        }
+      }
+    } catch (e: any) {
+      lastErr = e;
+      if (!directFallback && singboxOk) {
+        console.log(`[流式] 代理连接异常，切换节点: ${e.message?.slice(0, 60) || e}`);
+        await switchSingboxNode(triedNodes);
+        continue;
+      }
+      stats.errors++;
+      const errBody = JSON.stringify({ error: { message: `流式请求失败: ${e.message || '未知错误'}` } });
+      const stream = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new TextEncoder().encode(errBody)); controller.close(); } });
+      audit(502, 0, keyId, reqPath);
+      return { status: 502, stream, headers: {} };
     }
-    return { status: 502, body: JSON.stringify({ error: 'proxy_error', message: e.message }) };
-  } finally {
-    // preserved: agent stays in LRU cache for reuse
+    if (res.status === 429) {
+      stats.rateLimited++;
+      console.log(`[429] 流式上游限流，切换节点 (attempt ${attempt + 1})`);
+      if (singboxOk) {
+        try {
+          const r = await fetch(`${SINGBOX_API_URL}/proxies/manual`, { signal: AbortSignal.timeout(2000) });
+          if (r.ok) { const d = await r.json() as any; if (d.now) triedNodes.add(d.now); }
+        } catch {}
+        await switchSingboxNode(triedNodes);
+      }
+      if (attempt >= 5) directFallback = true;
+      continue;
+    }
+    stats.total++;
+    if (res.status >= 200 && res.status < 300) stats.success++;
+    else if (res.status >= 500) {
+      stats.errors++;
+      // 500 是上游内部错误，切换节点没用，直接兜底直连
+      directFallback = true;
+      continue;
+    }
+    audit(res.status, Date.now() - start, keyId, reqPath);
+    return res;
+  }
+  // 直连兜底
+  try {
+    const finalRes = await doHttpsStream(reqPath, reqMethod, reqHeaders, reqBody);
+    stats.total++;
+    audit(finalRes.status, 0, keyId, reqPath);
+    return finalRes;
+  } catch (e: any) {
+    lastErr = e;
+  }
+  stats.errors++;
+  const errBody = JSON.stringify({ error: { message: `流式请求失败: ${lastErr?.message || '未知错误'}` } });
+  const stream = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new TextEncoder().encode(errBody)); controller.close(); } });
+  audit(502, 0, keyId, reqPath);
+  return { status: 502, stream, headers: {} };
+}function readBody(req: http.IncomingMessage): Promise<string> {
+  return new Promise((resolve) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (c: Buffer) => chunks.push(c));
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
+    req.on('error', () => resolve(Buffer.concat(chunks).toString('utf-8')));
+  });
+}
+
+function json(res: http.ServerResponse, status: number, obj: any) {
+  res.writeHead(status, { 'content-type': 'application/json' });
+  res.end(JSON.stringify(obj));
+}
+
+const PUBLIC_DIR = path.join(process.cwd(), 'public');
+
+const MIME_TYPES: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8',
+  '.htm': 'text/html; charset=utf-8',
+  '.js': 'application/javascript; charset=utf-8',
+  '.mjs': 'application/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon',
+  '.webp': 'image/webp',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.ttf': 'font/ttf',
+  '.eot': 'application/vnd.ms-fontobject',
+  '.txt': 'text/plain; charset=utf-8',
+  '.map': 'application/json',
+};
+
+/** 从 public/ 目录安全地提供静态文件；返回 true 表示已处理响应 */
+function serveStatic(res: http.ServerResponse, urlPath: string): boolean {
+  try {
+    // 解析到 public 目录内的真实路径，防目录穿越
+    const safePath = path.normalize(urlPath).replace(/^(\/\/)+/, '/');
+    const filePath = path.join(PUBLIC_DIR, safePath);
+    if (!filePath.startsWith(PUBLIC_DIR + path.sep) && filePath !== PUBLIC_DIR) return false;
+    if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) return false;
+    const ext = path.extname(filePath).toLowerCase();
+    const contentType = MIME_TYPES[ext] || 'application/octet-stream';
+    const data = fs.readFileSync(filePath);
+    res.writeHead(200, { 'content-type': contentType, 'cache-control': 'no-cache' });
+    res.end(data);
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -1476,916 +902,352 @@ async function dispatch(
 //  HTTP 服务器
 // ═══════════════════════════════════════════════════════════
 
-function collectHeadersFromReq(nodeReq: http.IncomingMessage): Record<string, string> {
-  const h: Record<string, string> = {};
-  for (const k of FORWARD) {
-    if (k === 'authorization') continue;
-    const v = nodeReq.headers[k];
-    if (v) h[k] = Array.isArray(v) ? v[0] : v;
-  }
-  h['authorization'] = 'Bearer public';
-  if (!h['x-opencode-client']) h['x-opencode-client'] = 'cli';
-  if (!h['content-type']) h['content-type'] = 'application/json';
-  return h;
-}
+async function handler(req: http.IncomingMessage, res: http.ServerResponse) {
+  const url = req.url || '/';
+  const method = req.method || 'GET';
+  const parsed = new URL(url, `http://${req.headers.host || 'localhost'}`);
+  const path = parsed.pathname;
 
-function readBody(nodeReq: http.IncomingMessage): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    nodeReq.on('data', (c: Buffer) => chunks.push(c));
-    nodeReq.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
-    nodeReq.on('error', reject);
-  });
-}
-
-function sendJson(nodeRes: http.ServerResponse, status: number, data: any) {
-  const body = JSON.stringify(data);
-  nodeRes.writeHead(status, {
-    'content-type': 'application/json',
-    'access-control-allow-origin': '*',
-  });
-  nodeRes.end(body);
-}
-
-function sendCors(nodeRes: http.ServerResponse) {
-  nodeRes.writeHead(204, {
-    'access-control-allow-origin': '*',
-    'access-control-allow-methods': 'GET, POST, PUT, DELETE, OPTIONS',
-    'access-control-allow-headers': 'content-type, authorization',
-  });
-  nodeRes.end();
-}
-
-const server = http.createServer(async (nodeReq, nodeRes) => {
-  const startTime = Date.now();
-  nodeRes.on('finish', () => {
-    const ms = Date.now() - startTime;
-    const path = nodeReq.url || '/';
-    if (!path.startsWith('/public/') && path !== '/favicon.ico') {
-      const ip = nodeReq.headers['x-forwarded-for'] || nodeReq.socket.remoteAddress || '-';
-      console.log(`[access] ${ip} ${nodeReq.method} ${path} -> ${nodeRes.statusCode} ${ms}ms`);
-    }
-  });
-  const url = new URL(nodeReq.url || '/', `http://${nodeReq.headers.host || 'localhost'}`);
-  const pathname = url.pathname;
-  const search = url.search;
-  const method = nodeReq.method || 'GET';
-
-  // CORS
-  if (method === 'OPTIONS') {
-    sendCors(nodeRes);
-    return;
-  }
-
-  // –– 静态文件（public/）––
-  // 根路径 → index.html
-  if (pathname === '/' || pathname === '') {
-    try {
-      const data = fs.readFileSync(path.join(process.cwd(), 'public', 'index.html'));
-      nodeRes.writeHead(200, { 'content-type': 'text/html' });
-      nodeRes.end(data);
-    } catch {
-      nodeRes.writeHead(404);
-      nodeRes.end('Not Found');
-    }
-    return;
-  }
-  if (pathname.startsWith('/public/')) {
-    const filePath = path.join(process.cwd(), pathname);
-    try {
-      const data = fs.readFileSync(filePath);
-      const ext = path.extname(filePath);
-      const mimeMap: Record<string, string> = {
-        '.html': 'text/html', '.css': 'text/css', '.js': 'application/javascript',
-        '.json': 'application/json', '.png': 'image/png', '.svg': 'image/svg+xml',
-      };
-      nodeRes.writeHead(200, { 'content-type': mimeMap[ext] || 'application/octet-stream' });
-      nodeRes.end(data);
-    } catch {
-      nodeRes.writeHead(404);
-      nodeRes.end('Not Found');
-    }
-    return;
-  }
-
-  // –– API: 状态 ––
-  if (pathname === '/api/status' && method === 'GET') {
-    const uptime = Math.floor((Date.now() - START_TIME) / 1000);
-    const poolsInfo: any[] = [];
-    for (const [keyId, pool] of keySlotPools) {
-      poolsInfo.push({
-        key: keyId.slice(0, 7) + '...' + keyId.slice(-4),
-        name: apiKeys[keyId]?.name || 'unknown',
-        enabled: apiKeys[keyId]?.enabled ?? false,
-        slots: pool.slots.map(s => ({
-          addr: s.addr,
-          latencyMs: s.latencyMs,
-          grade: s.qualityGrade,
-        })),
-        lastUsedAt: pool.lastUsedAt,
-        requestCount: apiKeys[keyId]?.requestCount || 0,
-      });
-    }
-    const totalSlots = SLOTS_PER_KEY * MAX_ACTIVE_KEYS;
-    let slotsReady = 0;
-    for (const pool of keySlotPools.values()) slotsReady += pool.slots.length;
-    sendJson(nodeRes, 200, {
-      ok: true,
-      uptime,
-      stats,
-      activeKeys: keySlotPools.size,
-      maxActiveKeys: MAX_ACTIVE_KEYS,
-      slotCount: SLOTS_PER_KEY,
-      slotsReady,
-      pools: poolsInfo,
-      warpAvailable: !!warpSlot,
-      warpStatus,
-      warpMode: warpModeRuntime,
-      candidatesCount: candidates.length,
-      releasedCandidatesCount: releasedCandidates.length,
-      customSlotsCount: customSlots.length,
-      fallbackAvailable: !!fallbackSlot,
-      fallbackAddr: fallbackSlot?.addr || null,
-      totalApiKeys: Object.keys(apiKeys).length,
-    });
-    return;
-  }
-
-  // –– API: 日志 ––
-  if (pathname === '/api/logs' && method === 'GET') {
-    sendJson(nodeRes, 200, { logs: recentLogs.slice(-200) });
-    return;
-  }
-
-  // –– API: 用量审计 ––
-  if (pathname === '/api/audit' && method === 'GET') {
-    const totalRequests = auditLog.length;
-    let totalTokens = 0, totalPrompt = 0, totalCompletion = 0, cacheRead = 0;
-    const keyMap: Record<string, { name: string; key: string; requests: number; totalTokens: number; lastUsedAt: number | null }> = {};
-    const modelMap: Record<string, { model: string; requests: number; promptTokens: number; completionTokens: number; totalTokens: number; cacheRead: number }> = {};
-    const dayMap: Record<string, { date: string; requests: number; totalTokens: number; promptTokens: number; completionTokens: number; cacheRead: number }> = {};
-
-    for (const log of auditLog) {
-      totalTokens += log.totalTokens || 0;
-      totalPrompt += log.promptTokens || 0;
-      totalCompletion += log.completionTokens || 0;
-      cacheRead += log.cacheRead || 0;
-
-      const keyId = log.keyId || 'unknown';
-      if (!keyMap[keyId]) {
-        keyMap[keyId] = { name: 'unknown', key: keyId, requests: 0, totalTokens: 0, lastUsedAt: null };
-      }
-      keyMap[keyId].requests++;
-      keyMap[keyId].totalTokens += log.totalTokens || 0;
-      if (log.ts && (!keyMap[keyId].lastUsedAt || log.ts > keyMap[keyId].lastUsedAt)) {
-        keyMap[keyId].lastUsedAt = log.ts;
-      }
-
-      const mdl = log.model || 'unknown';
-      if (!modelMap[mdl]) {
-        modelMap[mdl] = { model: mdl, requests: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0, cacheRead: 0 };
-      }
-      modelMap[mdl].requests++;
-      modelMap[mdl].promptTokens += log.promptTokens || 0;
-      modelMap[mdl].completionTokens += log.completionTokens || 0;
-      modelMap[mdl].totalTokens += log.totalTokens || 0;
-      modelMap[mdl].cacheRead += log.cacheRead || 0;
-
-      const day = new Date(log.ts || Date.now()).toISOString().split('T')[0];
-      if (!dayMap[day]) {
-        dayMap[day] = { date: day, requests: 0, totalTokens: 0, promptTokens: 0, completionTokens: 0, cacheRead: 0 };
-      }
-      dayMap[day].requests++;
-      dayMap[day].totalTokens += log.totalTokens || 0;
-      dayMap[day].promptTokens += log.promptTokens || 0;
-      dayMap[day].completionTokens += log.completionTokens || 0;
-      dayMap[day].cacheRead += log.cacheRead || 0;
-    }
-
-    const cacheHitRate = totalTokens > 0 ? cacheRead / totalTokens : 0;
-
-    sendJson(nodeRes, 200, {
-      summary: {
-        totalRequests,
-        totalTokens,
-        totalPrompt,
-        totalCompletion,
-        cacheHitRate,
-      },
-      keys: Object.values(keyMap).sort((a, b) => b.requests - a.requests),
-      models: Object.values(modelMap).sort((a, b) => b.requests - a.requests),
-      days: Object.values(dayMap).sort((a, b) => b.date.localeCompare(a.date)),
-    });
-    return;
-  }
-
-  // –– 从上游获取模型列表，过滤免费模型并缓存 ––
-async function fetchModelsFromUpstream(): Promise<any[]> {
-  let agent: https.Agent | undefined;
-  if (warpSlot) {
-    agent = new SocksProxyAgent(warpSlot.url, { timeout: 10000 }) as unknown as https.Agent;
-  }
-  const result = await new Promise<any>((resolve, reject) => {
-    const req = https.request(`${UPSTREAM}/v1/models`, {
-      method: 'GET',
-      headers: { accept: 'application/json', authorization: 'Bearer ' },
-      agent,
-      rejectUnauthorized: false,
-      timeout: 10000,
-    }, (res) => {
-      const chunks: Buffer[] = [];
-      res.on('data', (c: Buffer) => chunks.push(c));
-      res.on('end', () => {
-        try {
-          resolve(JSON.parse(Buffer.concat(chunks).toString('utf-8')));
-        } catch {
-          resolve({ data: [] });
-        }
-      });
-    });
-    req.on('error', reject);
-    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
-    req.end();
-  });
-  const freeModels = (result.data || []).filter((m: any) => m.id && m.id.endsWith('-free')).map((m: any) => ({
-    ...m,
-    id: m.id.replace(/-free$/, ''),
-  }));
-  cachedModels = freeModels;
-  cachedModelsTime = Date.now();
-  saveModelsCache(freeModels);
-  return freeModels;
-}
-
-// –– API: 模型列表 ––
-  if (pathname === '/api/models' && method === 'GET') {
-    try {
-      if (cachedModels.length > 0 && Date.now() - cachedModelsTime < 300000) {
-        sendJson(nodeRes, 200, { models: cachedModels });
+  try {
+    // ───────────────────────────────────────────────
+    //  GET /  — 状态页
+    // ───────────────────────────────────────────────
+    if (path === '/' && method === 'GET') {
+      // 新管理面板：public/index.html 存在则优先返回，否则回退内嵌状态页
+      const idxPath = PUBLIC_DIR + '/index.html';
+      if (fs.existsSync(idxPath)) {
+        const data = fs.readFileSync(idxPath);
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-cache' });
+        res.end(data);
         return;
       }
-      const freeModels = await fetchModelsFromUpstream();
-      sendJson(nodeRes, 200, { models: freeModels });
-    } catch (e: any) {
-      sendJson(nodeRes, 502, { error: e.message });
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>opencode-gate</title></head>
+<body style="font-family:monospace;margin:2em">
+<h2>🚀 opencode-gate (SingBox 版)</h2>
+<p>运行时间: ${Math.floor((Date.now() - START_TIME) / 1000)}s</p>
+<p>SingBox: ${SINGBOX_MODE === 'on' ? (singboxOk ? '✅ 正常' : '❌ 离线') : '⏹️ 关闭'}</p>
+<p>节点: ${singboxNodes.length} 个</p>
+<p>Key: ${Object.keys(apiKeys).length} 个</p>
+<p>请求: ${stats.total} (成功 ${stats.success} / 限流 ${stats.rateLimited} / 错误 ${stats.errors})</p>
+<p><a href="/status">/status</a> — <a href="/api/keys">/api/keys</a> — <a href="/api/audit">/api/audit</a> — <a href="/api/logs">/api/logs</a> — <a href="/api/models">/api/models</a></p>
+</body></html>`);
+      return;
     }
-    return;
-  }
 
-  // –– API: 密钥管理 ––
-  if (pathname === '/api/keys' && method === 'GET') {
-    const keys = Object.values(apiKeys).map(r => ({
-      key: r.key.slice(0, 7) + '...' + r.key.slice(-4),
-      fullKey: r.key,
-      name: r.name,
-      enabled: r.enabled,
-      createdAt: r.createdAt,
-      lastUsedAt: r.lastUsedAt,
-      totalRequests: r.totalRequests,
-      totalTokens: r.totalTokens,
-      maxConcurrency: r.maxConcurrency,
-      maxRequests: r.maxRequests,
-      requestCount: r.requestCount,
-      expiresAt: r.expiresAt,
-    }));
-    sendJson(nodeRes, 200, { keys });
-    return;
-  }
+    // ───────────────────────────────────────────────
+    //  GET /status  — 简要状态
+    // ───────────────────────────────────────────────
+    if (path === '/status' && method === 'GET') {
+      json(res, 200, {
+        uptime: Date.now() - START_TIME,
+        singbox: { mode: SINGBOX_MODE, ok: singboxOk, nodes: singboxNodes.length, currentNode: singboxNodeIndex },
+        keys: Object.keys(apiKeys).length,
+        stats, activeRequests: Object.values(activeRequests).reduce((a, b) => a + b, 0),
+        cachedModels: cachedModels.length,
+      });
+      return;
+    }
 
-  // POST /api/keys — 创建新 Key
-  if (pathname === '/api/keys' && method === 'POST') {
-    try {
-      const body = JSON.parse(await readBody(nodeReq));
-      const newKey = body.key || crypto.randomBytes(24).toString('hex');
-      if (apiKeys[newKey]) {
-        sendJson(nodeRes, 409, { error: 'Key 已存在' });
-        return;
-      }
-      apiKeys[newKey] = {
-        key: newKey,
-        name: body.name || '未命名',
-        enabled: body.enabled !== false,
-        createdAt: Date.now(),
-        lastUsedAt: 0,
-        totalRequests: 0,
-        totalTokens: 0,
-        maxConcurrency: body.maxConcurrency || 0,
-        maxRequests: body.maxRequests || 0,
-        requestCount: 0,
-        expiresAt: body.expiresAt || 0,
+    // ───────────────────────────────────────────────
+    //  GET /api/logs
+    // ───────────────────────────────────────────────
+    if (path === '/api/logs' && method === 'GET') {
+      json(res, 200, { logs: recentLogs.slice(-200) });
+      return;
+    }
+
+    // ───────────────────────────────────────────────
+    //  GET /api/audit
+    // ───────────────────────────────────────────────
+    if (path === '/api/audit' && method === 'GET') {
+      json(res, 200, { audit: auditLog.slice(-500) });
+      return;
+    }
+
+    // ───────────────────────────────────────────────
+    //  GET /api/keys
+    // ───────────────────────────────────────────────
+    if (path === '/api/keys' && method === 'GET') {
+      json(res, 200, { keys: apiKeys });
+      return;
+    }
+
+    // ───────────────────────────────────────────────
+    //  POST /api/keys  — 创建 key
+    // ───────────────────────────────────────────────
+    if (path === '/api/keys' && method === 'POST') {
+      const body = JSON.parse(await readBody(req));
+      const key = body.key || 'sk-' + crypto.randomBytes(16).toString('hex');
+      apiKeys[key] = {
+        key, name: body.name || 'unnamed', enabled: true,
+        createdAt: Date.now(), lastUsedAt: 0,
+        totalRequests: 0, totalTokens: 0,
+        maxConcurrency: body.maxConcurrency || 5,
+        maxRequests: body.maxRequests || 1000000,
+        requestCount: 0, expiresAt: body.expiresAt || Date.now() + 365 * 86400000,
       };
       saveKeys();
-      sendJson(nodeRes, 201, { key: newKey, message: '创建成功' });
-    } catch (e: any) {
-      sendJson(nodeRes, 400, { error: e.message });
-    }
-    return;
-  }
-
-  // PUT /api/keys/:key — 更新 Key
-  const putMatch = pathname.match(/^\/api\/keys\/(.+)$/);
-  if (putMatch && method === 'PUT') {
-    const targetKey = putMatch[1];
-    const record = apiKeys[targetKey];
-    if (!record) {
-      sendJson(nodeRes, 404, { error: 'Key 不存在' });
-      return;
-    }
-    try {
-      const body = JSON.parse(await readBody(nodeReq));
-      if (body.name !== undefined) record.name = body.name;
-      if (body.enabled !== undefined) record.enabled = body.enabled;
-      if (body.maxConcurrency !== undefined) record.maxConcurrency = body.maxConcurrency;
-      if (body.maxRequests !== undefined) record.maxRequests = body.maxRequests;
-      if (body.expiresAt !== undefined) record.expiresAt = body.expiresAt;
-      saveKeys();
-      // 如果禁用或超限 → 释放 slot
-      if (!record.enabled) {
-        releaseKeySlots(targetKey);
-      } else if (record.maxRequests > 0 && record.requestCount >= record.maxRequests) {
-        releaseKeySlots(targetKey);
-      }
-      sendJson(nodeRes, 200, { message: '更新成功' });
-    } catch (e: any) {
-      sendJson(nodeRes, 400, { error: e.message });
-    }
-    return;
-  }
-
-  // DELETE /api/keys/:key — 删除 Key
-  if (putMatch && method === 'DELETE') {
-    const targetKey = putMatch[1];
-    if (!apiKeys[targetKey]) {
-      sendJson(nodeRes, 404, { error: 'Key 不存在' });
-      return;
-    }
-    releaseKeySlots(targetKey);
-    delete apiKeys[targetKey];
-    saveKeys();
-    sendJson(nodeRes, 200, { message: '删除成功' });
-    return;
-  }
-
-  // –– API: WARP 控制 ––
-  if (pathname === '/api/warp' && method === 'POST') {
-    try {
-      const body = JSON.parse(await readBody(nodeReq));
-      if (body.action === 'enable') {
-        warpModeRuntime = 'on';
-        warpHostRuntime = body.host || WARP_HOST;
-        warpPortRuntime = body.port || WARP_SOCKS5_PORT;
-        const ok = await probeWarp();
-        sendJson(nodeRes, 200, { ok, warpStatus, message: ok ? 'WARP 已启用' : 'WARP 探活失败' });
-      } else if (body.action === 'disable') {
-        warpModeRuntime = 'off';
-        warpSlot = null;
-        warpStatus = 'stopped';
-        sendJson(nodeRes, 200, { ok: true, message: 'WARP 已禁用' });
-      } else {
-        sendJson(nodeRes, 400, { error: '未知操作' });
-      }
-    } catch (e: any) {
-      sendJson(nodeRes, 400, { error: e.message });
-    }
-    return;
-  }
-
-  // –– API: 刷新候选 ––
-  if (pathname === '/api/refresh' && method === 'POST') {
-    refreshCandidates().then(() => {
-      sendJson(nodeRes, 200, { ok: true, candidatesCount: candidates.length });
-    }).catch(e => {
-      sendJson(nodeRes, 500, { error: e.message });
-    });
-    return;
-  }
-
-  // –– API: 手动分配 slot ––
-  if (pathname === '/api/slots/fill' && method === 'POST') {
-    try {
-      const body = JSON.parse(await readBody(nodeReq));
-      const targetKey = body.key || API_KEY;
-      const pool = await getKeySlotPool(targetKey);
-      if (!pool) {
-        sendJson(nodeRes, 503, { error: '无法分配 slot' });
-        return;
-      }
-      sendJson(nodeRes, 200, {
-        ok: true,
-        key: targetKey.slice(0, 7) + '...',
-        slots: pool.slots.map(s => ({ addr: s.addr, latencyMs: s.latencyMs, grade: s.qualityGrade })),
-      });
-    } catch (e: any) {
-      sendJson(nodeRes, 400, { error: e.message });
-    }
-    return;
-  }
-
-  // –– API: 代理列表 ––
-  if (pathname === '/api/proxies' && method === 'GET') {
-    const list = candidates.map(c => ({
-      address: c.address,
-      protocol: c.protocol,
-      quality_grade: c.quality_grade,
-      latency: c.latency,
-      lockedBy: c.lockedBy,
-      active: !!c.lockedBy,
-    }));
-    const releasedList = releasedCandidates.map(r => ({
-      address: r.address,
-      protocol: r.protocol,
-      quality_grade: r.quality_grade,
-      consecutiveFailures: r.consecutiveFailures,
-      consecutiveSuccesses: r.consecutiveSuccesses,
-      lastFailedAt: r.lastFailedAt,
-      lastSucceededAt: r.lastSucceededAt,
-    }));
-    sendJson(nodeRes, 200, { proxies: list, count: list.length, released: releasedList, releasedCount: releasedList.length });
-    return;
-  }
-
-  // –– API: 批量添加代理 ––
-  if (pathname === '/api/proxies' && method === 'POST') {
-    try {
-      const body = JSON.parse(await readBody(nodeReq));
-      const addrs: string[] = body.proxies || [];
-      let added = 0;
-      for (const addr of addrs) {
-        const trimmed = addr.trim();
-        if (!trimmed) continue;
-        const isSocks = trimmed.startsWith('socks5://') || trimmed.startsWith('socks5h://');
-        const cleanAddr = trimmed.replace(/^https?:\/\//, '').replace(/^socks5h?:\/\//, '');
-        if (!candidates.find(c => c.address === cleanAddr) && !customProxyItems.find(c => c.address === cleanAddr)) {
-          const item: ProxyItem = { address: cleanAddr, protocol: isSocks ? 'socks5' : 'http', latency: 0, quality_grade: 'C' };
-          candidates.push({ ...item, lockedBy: null });
-          customProxyItems.push(item);
-          added++;
-        }
-      }
-      if (added > 0) saveCustomProxies();
-      sendJson(nodeRes, 200, { message: '已添加', count: added });
-    } catch (e: any) {
-      sendJson(nodeRes, 400, { error: e.message });
-    }
-    return;
-  }
-
-  // –– API: 删除代理 ––
-  const proxyDelMatch = pathname.match(/^\/api\/proxies\/(.+)$/);
-  if (proxyDelMatch && method === 'DELETE') {
-    const addr = decodeURIComponent(proxyDelMatch[1]);
-    const idx = candidates.findIndex(c => c.address === addr);
-    if (idx >= 0) {
-      const locked = candidates[idx].lockedBy;
-      if (locked) releaseKeySlots(locked);
-      candidates.splice(idx, 1);
-      // 从自定义持久化中删除
-      const custIdx = customProxyItems.findIndex(c => c.address === addr);
-      if (custIdx >= 0) {
-        customProxyItems.splice(custIdx, 1);
-        saveCustomProxies();
-      }
-      sendJson(nodeRes, 200, { message: '已删除' });
-    } else {
-      sendJson(nodeRes, 404, { error: 'not_found' });
-    }
-    return;
-  }
-
-  // –– API: 提升（插队到队列最前）––
-  if (pathname === '/api/promote' && method === 'POST') {
-    try {
-      const body = JSON.parse(await readBody(nodeReq));
-      const addr = body.addr;
-      const idx = candidates.findIndex(c => c.address === addr);
-      if (idx >= 0) {
-        const [item] = candidates.splice(idx, 1);
-        candidates.unshift(item);
-        sendJson(nodeRes, 200, { message: '已提升', position: 0 });
-      } else {
-        sendJson(nodeRes, 200, { message: 'not_in_pool' });
-      }
-    } catch (e: any) {
-      sendJson(nodeRes, 400, { error: e.message });
-    }
-    return;
-  }
-
-  // –– API: 备用池测活（手动触发）––
-  if (pathname === '/api/released/probe' && method === 'POST') {
-    probeReleasedCandidates().then(() => {
-      sendJson(nodeRes, 200, { message: '备用池测活完成', releasedCount: releasedCandidates.length });
-    }).catch(e => {
-      sendJson(nodeRes, 500, { error: e.message });
-    });
-    return;
-  }
-
-  // –– API: 测试 Fallback 代理连通性 ––
-  if (pathname === '/api/fallback/test' && method === 'POST') {
-    try {
-      const body = JSON.parse(await readBody(nodeReq));
-      const addr = body.address;
-      if (!addr) {
-        sendJson(nodeRes, 400, { error: 'address 必填' });
-        return;
-      }
-      const isSocks = addr.startsWith('socks5://') || addr.startsWith('socks5h://');
-      let fullAddr = addr.replace(/^https?:\/\//, '').replace(/^socks5h?:\/\//, '');
-      // 去掉认证信息 user:pass@
-      const cleanAddr = fullAddr.replace(/^[^@]+@/, '');
-      const proxyItem: ProxyItem = { address: cleanAddr, fullAddr: fullAddr, protocol: isSocks ? 'socks5' : 'http', latency: 999, quality_grade: 'F' };
-      const r = await probe(proxyItem);
-      sendJson(nodeRes, 200, { ok: r.ok, latencyMs: r.latencyMs, address: cleanAddr });
-    } catch (e: any) {
-      sendJson(nodeRes, 500, { error: e.message });
-    }
-    return;
-  }
-
-  // –– API: 代理源列表 ––
-  if (pathname === '/api/sources' && method === 'GET') {
-    const list = proxySources.map(s => ({
-      name: s.name,
-      type: s.type,
-      count: sourceCounts[s.name] || 0,
-      error: null,
-    }));
-    sendJson(nodeRes, 200, { sources: list });
-    return;
-  }
-
-  // –– API: 添加代理源 ––
-  if (pathname === '/api/sources' && method === 'POST') {
-    try {
-      const body = JSON.parse(await readBody(nodeReq));
-      const name = body.name;
-      if (!name || !body.url) {
-        sendJson(nodeRes, 400, { error: 'name 和 url 必填' });
-        return;
-      }
-      if (proxySources.find(s => s.name === name)) {
-        sendJson(nodeRes, 409, { error: '同名代理源已存在' });
-        return;
-      }
-      const def = DEFAULT_SOURCES.find(d => d.name === name);
-      const srcType = body.type || 'text';
-      proxySources.push({
-        name, url: body.url,
-        type: srcType as any,
-        parser: def ? def.parser : (srcType === 'json' ? DEFAULT_SOURCES[0].parser : (data: string) => genericTextParser(data, s.protocol)),
-      });
-      saveSources();
-      sendJson(nodeRes, 200, { message: '已添加', name, url: body.url });
-    } catch (e: any) {
-      sendJson(nodeRes, 400, { error: e.message });
-    }
-    return;
-  }
-
-  // –– API: 删除代理源 ––
-  const sourceDelMatch = pathname.match(/^\/api\/sources\/(.+)$/);
-  if (sourceDelMatch && method === 'DELETE') {
-    const name = decodeURIComponent(sourceDelMatch[1]);
-    const idx = proxySources.findIndex(s => s.name === name);
-    if (idx >= 0) {
-      proxySources.splice(idx, 1);
-      saveSources();
-      sendJson(nodeRes, 200, { message: '已删除', name });
-    } else {
-      sendJson(nodeRes, 404, { error: 'not_found' });
-    }
-    return;
-  }
-
-  // –– API: 配置（status/config） ––
-  if (pathname === '/api/config' && method === 'GET') {
-    sendJson(nodeRes, 200, {
-      port: PORT,
-      slotCount: SLOTS_PER_KEY,
-      maxActiveKeys: MAX_ACTIVE_KEYS,
-      warpMode: warpModeRuntime,
-      warpHost: warpHostRuntime,
-      warpPort: warpPortRuntime,
-      warpStatus,
-      proxyRefreshMs: PROXY_REFRESH_MS,
-      proxyProbeTimeout: PROXY_PROBE_TIMEOUT,
-      fallbackProxy: FALLBACK_PROXY_RUNTIME,
-    });
-    return;
-  }
-
-  // –– API: 更新配置 ––
-  if (pathname === '/api/config' && method === 'POST') {
-    try {
-      const body = JSON.parse(await readBody(nodeReq));
-      if (body.warpMode !== undefined) {
-        const oldMode = warpModeRuntime;
-        warpModeRuntime = body.warpMode;
-        if (body.warpMode === 'on') {
-          probeWarp();
-        } else {
-          warpStatus = 'stopped';
-          warpSlot = null;
-        }
-        console.log(`[配置] WARP 模式: ${oldMode} → ${body.warpMode}`);
-      }
-      if (body.fallbackProxy !== undefined && String(body.fallbackProxy).trim() !== '') {
-        FALLBACK_PROXY_RUNTIME = String(body.fallbackProxy).trim();
-        console.log(`[配置] Fallback 代理已更新`);
-        // 重新初始化 fallback
-        fallbackSlot = null;
-        initFallbackProxy().then(() => {
-          console.log('[配置] Fallback 初始化完成');
-        }).catch(e => console.error('[配置] Fallback 初始化失败:', e.message));
-      }
-      sendJson(nodeRes, 200, { message: '配置已更新', warpMode: warpModeRuntime });
-    } catch (e: any) {
-      sendJson(nodeRes, 400, { error: e.message });
-    }
-    return;
-  }
-
-  // –– API: 配置热加载（从磁盘重新加载全部配置） ––
-  if (pathname === '/api/config/reload' && method === 'POST') {
-    try {
-      loadSources();
-      loadCustomProxies();
-      loadKeys();
-      loadReleasedCandidates();
-      initCustomSlots().catch(e => console.error('[热加载] 自定义代理初始化失败:', e.message));
-      initFallbackProxy().catch(e => console.error('[热加载] Fallback 初始化失败:', e.message));
-      sendJson(nodeRes, 200, { message: '配置已重新加载，候选池正在后台刷新', candidates: candidates.length, released: releasedCandidates.length });
-      refreshCandidates().then(() => {
-        console.log(`[热加载] 候选池刷新完毕: ${candidates.length} 个`);
-      }).catch(e => {
-        console.error('[热加载] 候选池刷新失败:', e.message);
-      });
-    } catch (e: any) {
-      sendJson(nodeRes, 400, { error: e.message });
-    }
-    return;
-  }
-
-  // –– API: 加载候选池 ––
-  if (pathname === '/api/candidates/load' && method === 'POST') {
-    refreshCandidates().then(() => {
-      sendJson(nodeRes, 200, { message: '已刷新', count: candidates.length });
-    }).catch(e => {
-      sendJson(nodeRes, 500, { error: e.message });
-    });
-    return;
-  }
-
-  // –– API: 刷新代理源（同加载候选池）––
-  if (pathname === '/api/sources/refresh' && method === 'POST') {
-    refreshCandidates().then(() => {
-      sendJson(nodeRes, 200, { message: '已刷新', count: candidates.length });
-    }).catch(e => {
-      sendJson(nodeRes, 500, { error: e.message });
-    });
-    return;
-  }
-
-  // –– API: 每日审计详情 ––
-  if (pathname === '/api/audit/daily' && method === 'GET') {
-    const url = new URL(nodeReq.url || '', 'http://localhost');
-    const date = url.searchParams.get('date') || new Date().toISOString().split('T')[0];
-    const entries = auditLog
-      .filter(log => {
-        const logDate = new Date(log.ts || 0).toISOString().split('T')[0];
-        return logDate === date;
-      })
-      .map(log => ({
-        time: new Date(log.ts || 0).toLocaleTimeString(),
-        model: log.model || 'unknown',
-        promptTokens: log.promptTokens || 0,
-        completionTokens: log.completionTokens || 0,
-        totalTokens: log.totalTokens || 0,
-        cacheRead: log.cacheRead || 0,
-        latencyMs: log.latencyMs || 0,
-        status: log.status || 0,
-      }))
-      .sort((a, b) => a.time.localeCompare(b.time));
-    sendJson(nodeRes, 200, { entries });
-    return;
-  }
-
-  // –– 代理转发（/v1/* | /openai/v1/*）–
-  if (pathname.startsWith('/v1/') || pathname.startsWith('/openai/v1/')) {
-    // OpenAI 兼容路径 → 标准化为 /v1/
-    const upstreamPath = pathname.replace(/^\/openai/, '');
-    // 提取认证 Key
-    const authHeader = nodeReq.headers['authorization'] || '';
-    const authKey = authHeader.replace(/^Bearer\s+/i, '');
-    if (!authKey) {
-      sendJson(nodeRes, 401, { error: 'unauthorized', message: '缺少 Authorization' });
-      return;
-    }
-    const kv = validateKey(authKey);
-    if (!kv.ok) {
-      sendJson(nodeRes, 403, { error: 'forbidden', message: kv.reason });
+      json(res, 200, { success: true, key });
       return;
     }
 
-    acquireKey(authKey);
-    const startTime = Date.now();
+    // ───────────────────────────────────────────────
+    //  DELETE /api/keys/:key
+    // ───────────────────────────────────────────────
+    if (path.startsWith('/api/keys/') && method === 'DELETE') {
+      const key = path.slice('/api/keys/'.length);
+      if (apiKeys[key]) { delete apiKeys[key]; saveKeys(); json(res, 200, { success: true }); }
+      else json(res, 404, { error: 'key 不存在' });
+      return;
+    }
 
-    const reqHeaders = collectHeadersFromReq(nodeReq);
-    const bodyStr = method !== 'GET' && method !== 'HEAD' ? await readBody(nodeReq) : undefined;
+    // ───────────────────────────────────────────────
+    //  GET /api/models
+    // ───────────────────────────────────────────────
+    if (path === '/api/models' && method === 'GET') {
+      json(res, 200, { data: cachedModels, cachedAt: cachedModelsTime });
+      return;
+    }
 
-    // 拦截 /v1/models → 返回缓存的免费模型（不需分配 slot）
-    if (upstreamPath === '/v1/models' && method === 'GET') {
+    // ───────────────────────────────────────────────
+    //  POST /api/models/refresh  — 刷新模型列表
+    // ───────────────────────────────────────────────
+    if (path === '/api/models/refresh' && method === 'POST') {
+      const models = await fetchModelsFromUpstream();
+      json(res, 200, { success: true, count: models.length });
+      return;
+    }
+
+    // ───────────────────────────────────────────────
+    //  POST /api/subscription  — 添加订阅
+    // ───────────────────────────────────────────────
+    if (path === '/api/subscription' && method === 'POST') {
+      const body = JSON.parse(await readBody(req));
+      if (!body.url) { json(res, 400, { error: 'url 必填' }); return; }
+      const sub: SubscriptionConfig = { url: body.url, token: body.token || '', updatedAt: Date.now() };
       try {
-        if (cachedModels.length > 0 && Date.now() - cachedModelsTime < 300000) {
-          sendJson(nodeRes, 200, { object: 'list', data: cachedModels });
-          releaseKey(authKey);
-          return;
-        }
-        const result = await fetchModelsFromUpstream();
-        sendJson(nodeRes, 200, { object: 'list', data: result });
-        releaseKey(authKey);
-        return;
+        const count = await generateSingboxConfig(sub);
+        saveSubscription(sub);
+        await reloadSingboxConfig();
+        json(res, 200, { success: true, nodes: count, message: `已解析 ${count} 个节点，sing-box 已重载` });
       } catch (e: any) {
-        sendJson(nodeRes, 502, { error: e.message });
-        releaseKey(authKey);
+        json(res, 500, { error: `生成配置失败: ${e.message}` });
+      }
+      return;
+    }
+
+    // ───────────────────────────────────────────────
+    //  GET /api/subscription  — 查看订阅状态
+    // ───────────────────────────────────────────────
+    if (path === '/api/subscription' && method === 'GET') {
+      const sub = loadSubscription();
+      json(res, 200, {
+        subscription: sub,
+        nodes: singboxNodes,
+        currentNode: singboxNodes[singboxNodeIndex] || '',
+        nodeIndex: singboxNodeIndex,
+        singboxOk,
+        configFile: fs.existsSync(path.join(SINGBOX_CONFIG_DIR, 'singbox_config.json')),
+      });
+      return;
+    }
+
+    // ───────────────────────────────────────────────
+    //  POST /api/singbox/switch  — 手动切换节点
+    // ───────────────────────────────────────────────
+    if (path === '/api/singbox/switch' && method === 'POST') {
+      const node = await switchSingboxNode();
+      if (node) json(res, 200, { success: true, node });
+      else json(res, 500, { error: '切换失败' });
+      return;
+    }
+
+    // ───────────────────────────────────────────────
+    //  POST /api/singbox/check  — 检查 sing-box 健康
+    // ───────────────────────────────────────────────
+    if (path === '/api/singbox/check' && method === 'POST') {
+      const ok = await checkSingboxHealth();
+      json(res, 200, { ok, nodes: singboxNodes.length, currentNode: singboxNodes[singboxNodeIndex] || '' });
+      return;
+    }
+
+    // ───────────────────────────────────────────────
+    //  POST /api/singbox/reload  — 重载 sing-box 配置
+    // ───────────────────────────────────────────────
+    if (path === '/api/singbox/reload' && method === 'POST') {
+      const ok = await reloadSingboxConfig();
+      json(res, 200, { success: ok });
+      return;
+    }
+
+    // ───────────────────────────────────────────────
+    //  GET /api/stats  — 详细统计
+    // ───────────────────────────────────────────────
+    if (path === '/api/stats' && method === 'GET') {
+      json(res, 200, {
+        stats,
+        uptime: Date.now() - START_TIME,
+        activeRequests: Object.entries(activeRequests).map(([k, v]) => ({ key: k, count: v })),
+        singbox: { ok: singboxOk, nodes: singboxNodes.length },
+      });
+      return;
+    }
+
+    // ───────────────────────────────────────────────
+    //  v1/chat/completions  — 非流式
+    // ───────────────────────────────────────────────
+    if (path === '/v1/chat/completions' && (method === 'POST' || method === 'OPTIONS')) {
+      if (method === 'OPTIONS') { res.writeHead(204, { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'POST,OPTIONS', 'access-control-allow-headers': '*' }); res.end(); return; }
+      const body = await readBody(req);
+      const auth = req.headers['authorization'] || '';
+      const key = auth.replace(/^Bearer\s+/i, '').trim();
+      const v = validateKey(key);
+      if (!v.valid) { json(res, 401, { error: { message: v.reason } }); return; }
+      acquireKey(key);
+      try {
+        const parsed = JSON.parse(body);
+        const isStream = !!parsed.stream;
+        recordKeyUsage(key, 0);
+        if (isStream) {
+          const result = await dispatchStream(path, method, collectHeadersFromReq(req), body, key);
+          res.writeHead(result.status, {
+            'content-type': 'text/event-stream',
+            'cache-control': 'no-cache',
+            'connection': 'keep-alive',
+            ...result.headers,
+          });
+          const reader = result.stream.getReader();
+          const pump = async () => {
+            try { while (true) { const { done, value } = await reader.read(); if (done) { res.end(); return; } res.write(value); } }
+            catch { res.end(); }
+          };
+          pump();
+        } else {
+          const result = await dispatchNonStream(path, method, collectHeadersFromReq(req), body, key);
+          const usage = extractUsageFromResponse(result.body);
+          if (usage.tokens > 0) recordKeyUsage(key, usage.tokens);
+          res.writeHead(result.status, { 'content-type': 'application/json', 'access-control-allow-origin': '*' });
+          res.end(result.body);
+        }
+      } catch (e: any) {
+        json(res, 400, { error: { message: `请求解析失败: ${e.message}` } });
+      } finally {
+        releaseKey(key);
+      }
+      return;
+    }
+
+    // ───────────────────────────────────────────────
+    //  v1/* 其他端点 — 代理到上游
+    // ───────────────────────────────────────────────
+    if (path.startsWith('/v1/')) {
+      const auth = req.headers['authorization'] || '';
+      const key = auth.replace(/^Bearer\s+/i, '').trim();
+      const v = validateKey(key);
+      if (!v.valid) { json(res, 401, { error: { message: v.reason } }); return; }
+      acquireKey(key);
+      try {
+        const body = method === 'GET' || method === 'DELETE' ? undefined : await readBody(req);
+        const result = await dispatchNonStream(path, method, collectHeadersFromReq(req), body || '', key);
+        // /v1/models 只保留 free 模型（兼容旧行为，big-pickle 是隐身免费模型）
+        if (path === '/v1/models' && result.status === 200 && result.body) {
+          try {
+            const parsed = JSON.parse(result.body);
+            const all = parsed.data || parsed.models || [];
+            const freeModels = all.filter((m: any) => {
+              const id = String(m.id || '');
+              return id.endsWith('-free') || id === 'big-pickle';
+            });
+            parsed.data = freeModels;
+            parsed.models = freeModels;
+            res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' });
+            res.end(JSON.stringify(parsed));
+            return;
+          } catch {}
+        }
+        res.writeHead(result.status, { 'content-type': 'application/json', 'access-control-allow-origin': '*' });
+        res.end(result.body);
+      } catch (e: any) {
+        json(res, 500, { error: { message: e.message } });
+      } finally {
+        releaseKey(key);
+      }
+      return;
+    }
+
+    // ───────────────────────────────────────────────
+    //  静态文件服务 — public/ 目录（管理面板资源）
+    // ───────────────────────────────────────────────
+    if (method === 'GET' && !path.startsWith('/api/') && !path.startsWith('/v1/') && path !== '/status' && path !== '/ping') {
+      if (serveStatic(res, path)) return;
+      // SPA fallback：非 API 路径找不到文件时回退 index.html
+      const idxPath = PUBLIC_DIR + '/index.html';
+      if (fs.existsSync(idxPath)) {
+        const data = fs.readFileSync(idxPath);
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-cache' });
+        res.end(data);
         return;
       }
     }
 
-    try {
-      // 获取或创建 Key 的 slot 池
-      const pool = await getKeySlotPool(authKey);
-      if (!pool) {
-        sendJson(nodeRes, 503, { error: 'service_unavailable', message: '无法分配代理槽位，请稍后再试' });
-        return;
-      }
+    // ───────────────────────────────────────────────
+    //  404
+    // ───────────────────────────────────────────────
+    json(res, 404, { error: { message: 'not found' } });
 
-      const reqHeaders = collectHeadersFromReq(nodeReq);
-
-      const result = await dispatch(upstreamPath + search, method, reqHeaders, bodyStr, pool);
-
-      if (result.stream) {
-        // 流式响应
-        nodeRes.writeHead(result.status, {
-          'content-type': 'text/event-stream',
-          'cache-control': 'no-cache',
-          'connection': 'keep-alive',
-          'access-control-allow-origin': '*',
-          ...result.streamHeaders,
-        });
-        const reader = result.stream.getReader();
-        try {
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            nodeRes.write(value);
-          }
-        } catch {}
-        nodeRes.end();
-      } else {
-        // 普通响应
-        const respBody = result.body || '{}';
-        const usage = extractUsageFromResponse(respBody);
-        if (usage.tokens > 0) recordKeyUsage(authKey, usage.tokens);
-        nodeRes.writeHead(result.status, {
-          'content-type': 'application/json',
-          'access-control-allow-origin': '*',
-        });
-        nodeRes.end(respBody);
-      }
-    } catch (e: any) {
-      console.error(`[请求] 异常: ${e.message}`);
-      sendJson(nodeRes, 502, { error: 'gateway_error', message: e.message });
-    } finally {
-      releaseKey(authKey);
-    }
-    return;
+  } catch (e: any) {
+    console.error(`[handler] ${e.message}`);
+    json(res, 500, { error: { message: e.message } });
   }
-
-  // –– 404 ––
-  sendJson(nodeRes, 404, { error: 'not_found' });
-});
-
-// ═══════════════════════════════════════════════════════════
-//  定时任务
-// ═══════════════════════════════════════════════════════════
-
-// 定期刷新候选池
-setInterval(() => {
-  refreshCandidates();
-}, PROXY_REFRESH_MS);
-
-// 备用候选池定期测活
-setInterval(() => {
-  probeReleasedCandidates().catch(e => console.error('[备用池] 测活错误:', e.message));
-}, RELEASED_CANDIDATE_PROBE_INTERVAL);
-
-// Fallback 自愈：每 30s 检查，未就绪自动重试（防 goproxy 临时抖动/配置误清）
-setInterval(() => {
-  if (FALLBACK_PROXY_RUNTIME && !fallbackSlot) {
-    console.log('[Fallback] 检测到 fallback 未就绪，尝试重连...');
-    initFallbackProxy().catch(e => console.error('[Fallback] 重连异常:', e.message));
-  }
-}, 30000);
-
-// 定期清理过期/空闲的 Key Slot Pool
-setInterval(() => {
-  const now = Date.now();
-  for (const [keyId, pool] of keySlotPools) {
-    const record = apiKeys[keyId];
-    if (!record || !record.enabled ||
-        (record.expiresAt > 0 && now > record.expiresAt) ||
-        (record.maxRequests > 0 && record.requestCount >= record.maxRequests)) {
-      releaseKeySlots(keyId);
-      continue;
-    }
-    if (now - pool.lastUsedAt > KEY_IDLE_RELEASE_MS) {
-      releaseKeySlots(keyId);
-      console.log(`[释放] Key ${keyId.slice(0,7)}... 空闲超时释放`);
-    }
-  }
-}, POOL_CLEANUP_MS);
+}
 
 // ═══════════════════════════════════════════════════════════
 //  启动
 // ═══════════════════════════════════════════════════════════
 
-async function main() {
-  console.log('═══════════════════════════════════════════════════');
-  console.log('  opencode-free-gate — Per-Key IP Pool 反代网关');
-  console.log('═══════════════════════════════════════════════════');
+const server = http.createServer(handler);
 
-  // 加载密钥
-  loadKeys();
-
-  // 加载代理源配置
-  loadSources();
-
-  // 加载自定义持久化代理
-  loadCustomProxies();
-
-  // 加载备用候选池
-  loadReleasedCandidates();
-
-  // 加载历史审计日志（最近 500 条）
-  loadAuditLog();
-  initAuditStream();
-
-  // 加载缓存的模型列表（启动时直接用，避免首次请求等待上游）
-  const cached = loadModelsCache();
-  if (cached && cached.models.length > 0 && Date.now() - cached.ts < 3600000) {
-    cachedModels = cached.models;
-    cachedModelsTime = cached.ts;
-    console.log(`[启动] 加载模型缓存: ${cached.models.length} 个（${Math.round((Date.now()-cached.ts)/60000)} 分钟前）`);
-  }
-
-  // 加载候选代理
-  console.log('[启动] 加载候选代理...');
-  await loadCandidates();
-
-  // 探活 WARP
-  if (warpModeRuntime === 'on') {
-    console.log('[启动] 探活 WARP...');
-    await probeWarp();
-  }
-
-  // 初始化自定义代理
-  await initCustomSlots();
-
-  // 初始化 Fallback 代理
-  await initFallbackProxy();
-
-  // 启动 HTTP 服务器
-  server.listen(PORT, () => {
-    console.log(`[启动] 监听端口 ${PORT}`);
-    console.log(`[启动] 候选代理: ${candidates.length} 个`);
-    console.log(`[启动] 兜底代理: ${customSlots.length} 个`);
-    console.log(`[启动] Fallback: ${fallbackSlot ? '就绪 ('+fallbackSlot.addr+')' : '未配置'}`);
-    console.log(`[启动] 备用候选: ${releasedCandidates.length} 个`);
-    console.log(`[启动] WARP: ${warpStatus}`);
-    console.log(`[启动] 最大活跃 Key: ${MAX_ACTIVE_KEYS}`);
-    console.log(`[启动] 每 Key slot 数: ${SLOTS_PER_KEY}`);
-    console.log('═══════════════════════════════════════════════════');
-
-    // WARP 自动恢复：每 30s 检查一次，挂了自动重连
-    if (warpModeRuntime === 'on') {
-      setInterval(async () => {
-        if (warpStatus !== 'running') {
-          console.log('[WARP] 检测到 WARP 异常，尝试重连...');
-          await probeWarp();
-        }
-      }, 30000);
-    }
-  });
-}
-
-main().catch(e => {
-  console.error('[启动] 致命错误:', e);
-  process.exit(1);
+server.on('request', (req, res) => {
+  // ping 健康检查
+  if (req.url === '/ping') { res.writeHead(200); res.end('pong'); return; }
 });
 
-// 退出时 flush 审计日志
-process.on('exit', () => { flushAudit(); });
-process.on('SIGINT', () => { flushAudit(); process.exit(0); });
-process.on('SIGTERM', () => { flushAudit(); process.exit(0); });
+server.listen(PORT, '0.0.0.0', async () => {
+  console.log(`\n[opencode-gate] SingBox 版启动`);
+  console.log(`[opencode-gate] 端口: ${PORT}`);
+  console.log(`[opencode-gate] 上游: ${UPSTREAM}`);
+  console.log(`[opencode-gate] SingBox: ${SINGBOX_MODE === 'on' ? `Socks5 ${SINGBOX_SOCKS_URL} / API ${SINGBOX_API_URL}` : '关闭'}`);
+  console.log(`[opencode-gate] 数据目录: ${DATA_DIR}`);
+  console.log(`[opencode-gate] API Key: ${API_KEY}\n`);
+
+  // 加载持久化数据
+  loadKeys();
+  loadAuditLog();
+  if (!loadModelsCache()) await fetchModelsFromUpstream();
+
+  // 初始化 sing-box
+  if (SINGBOX_MODE === 'on') {
+    loadSingboxNodes();
+    const ok = await checkSingboxHealth();
+    console.log(`[SingBox] 健康检查: ${ok ? '✅ 正常' : '❌ 离线'}`);
+    if (ok) {
+      loadSingboxNodes();
+      await initSingboxNode();
+      if (singboxOk) {
+        console.log(`[SingBox] 当前节点: ${singboxNodes[singboxNodeIndex]}`);
+      }
+    }
+  }
+
+  // 定期刷新模型
+  setInterval(() => fetchModelsFromUpstream(), 60000);
+  // 定期检查 sing-box 健康
+  if (SINGBOX_MODE === 'on') {
+    setInterval(() => checkSingboxHealth(), 30000);
+  }
+});
+
+// 优雅关闭
+process.on('SIGTERM', () => { console.log('关闭中...'); server.close(); setTimeout(() => process.exit(0), 1000); });
+process.on('SIGINT', () => { console.log('关闭中...'); server.close(); setTimeout(() => process.exit(0), 1000); });
