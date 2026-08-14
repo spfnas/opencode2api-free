@@ -125,6 +125,16 @@ if (stickySlot && !tried && !(stickySlot.cooldownUntil > now)) {
 - **冷却**：429/异常后指数退避（5s→60s+jitter），冷却期间该 Slot 被跳过但**不会被删除**，冷却结束后可复用。
 - `selectedSlot = null` 时触发 fallback 链向下传递。
 
+### 上游请求头注入（借鉴 opencode2api）
+
+`injectOpencodeHeaders()` 在 dispatch 层（流式/非流式）为每次 `/chat/completions` 请求生成三个 OpenCode 生态请求头（客户端显式传过则透传不覆盖）：
+
+- **`x-opencode-session`**：稳定会话 ID。优先取客户端 `x-opencode-session` / `x-session-id` / `conversation-id`，否则取 body 的 `conversation_id` / `metadata.session_id`，再否则用**第一条 user 消息内容**做种子；`sha256` 前 24 hex 生成 `ses_<hex>`。同会话多次请求拿到同一 session，帮助上游维持 prompt 缓存热度。
+- **`x-opencode-request`**：每次请求唯一 `req_<hex>`（同一次请求的重试保持不变，因为只在 dispatch 入口注入一次）。
+- **`x-opencode-project`**：取客户端 `x-opencode-project` / body `metadata.project_id`，默认 `opencode2api:default-project` → `prj_<hex>`。
+
+三个头在白名单 `FORWARD` 内，经 `doHttps`/`doHttpsStream` 原样转发给上游。
+
 ## 代理源（Proxy Sources）
 
 ### 来源与格式

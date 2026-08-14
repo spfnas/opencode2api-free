@@ -124,9 +124,86 @@ function collectHeadersFromReq(nodeReq: http.IncomingMessage): Record<string, st
     if (v) h[k] = Array.isArray(v) ? v[0] : v;
   }
   h['authorization'] = 'Bearer public';
-  if (!h['x-opencode-client']) h['x-opencode-client'] = 'desktop';
+  if (!h['x-opencode-client']) h['x-opencode-client'] = 'cli';
   if (!h['content-type']) h['content-type'] = 'application/json';
   return h;
+}
+
+// ═══════════════════════════════════════════════════════════
+//  OpenCode 会话/请求/项目 ID 生成（借鉴 jasonxu114514/opencode2api）
+//  为上游提供稳定的 x-opencode-session / 唯一的 x-opencode-request /
+//  稳定的 x-opencode-project，降低被上游误判为异常流量的概率
+// ═══════════════════════════════════════════════════════════
+
+function sha256Hex(s: string): string {
+  return crypto.createHash('sha256').update(s).digest('hex');
+}
+
+function stableID(prefix: string, value: string): string {
+  return prefix + '_' + sha256Hex(prefix + '\x00' + value).slice(0, 24);
+}
+
+function randomID(prefix: string, size = 16): string {
+  return prefix + '_' + crypto.randomBytes(size).toString('hex');
+}
+
+function firstNonEmpty(...values: (string | undefined | null)[]): string {
+  for (const v of values) {
+    const t = typeof v === 'string' ? v.trim() : '';
+    if (t) return t;
+  }
+  return '';
+}
+
+function conversationSeed(body: string): string {
+  try {
+    const parsed = JSON.parse(body);
+    if (!parsed) return '';
+    if (typeof parsed.input === 'string' && parsed.input) return parsed.input;
+    for (const field of ['messages', 'input']) {
+      const arr = parsed[field];
+      if (!Array.isArray(arr)) continue;
+      for (const item of arr) {
+        if (!item || typeof item !== 'object') continue;
+        if (item.role !== 'user') continue;
+        const content = JSON.stringify(item.content);
+        if (content && content !== 'null') return content;
+      }
+    }
+  } catch {}
+  return '';
+}
+
+function injectOpencodeHeaders(headers: Record<string, string>, body: string): void {
+  // session：优先客户端显式传入，否则用第一条用户消息做稳定种子
+  let sessionSignal = firstNonEmpty(
+    headers['x-opencode-session'],
+    headers['x-session-id'],
+    headers['conversation-id'],
+  );
+  if (!sessionSignal) {
+    try {
+      const parsed = JSON.parse(body);
+      sessionSignal = firstNonEmpty(parsed?.conversation_id, parsed?.metadata?.session_id);
+    } catch {}
+  }
+  if (!sessionSignal) sessionSignal = conversationSeed(body);
+  if (!sessionSignal || sessionSignal === '{}') sessionSignal = randomID('fallback', 16);
+  if (!headers['x-opencode-session']) headers['x-opencode-session'] = stableID('ses', sessionSignal);
+
+  // request：每次请求唯一（同一次请求的重试保持不变，因为 dispatch 层只注入一次）
+  if (!headers['x-opencode-request']) headers['x-opencode-request'] = randomID('req', 16);
+
+  // project：默认值
+  let projectSignal = firstNonEmpty(headers['x-opencode-project']);
+  if (!projectSignal) {
+    try {
+      const parsed = JSON.parse(body);
+      projectSignal = firstNonEmpty(parsed?.metadata?.project_id);
+    } catch {}
+  }
+  if (!projectSignal) projectSignal = 'opencode2api:default-project';
+  if (!headers['x-opencode-project']) headers['x-opencode-project'] = stableID('prj', projectSignal);
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -341,12 +418,7 @@ async function generateSingboxConfig(sub: SubscriptionConfig): Promise<number> {
   }
   if (outbounds.length === 0) throw new Error('订阅中未解析到任何 vless 节点');
 
-  // 精简节点数量，降低 urltest 测速对上游/CF 配额的消耗（2026-08-11）
-  const MAX_SINGBOX_NODES = 50;
-  if (outbounds.length > MAX_SINGBOX_NODES) {
-    console.log(`[SingBox] 节点数 ${outbounds.length} 超过上限 ${MAX_SINGBOX_NODES}，精简中...`);
-    outbounds = outbounds.slice(0, MAX_SINGBOX_NODES);
-  }
+  // 全部节点拉取，urltest 逐个测速（2026-08-12 用户要求取消上限）
 
   const nodeTags = outbounds.map(o => o['tag']);
   const config = {
@@ -569,11 +641,11 @@ function doHttps(
 ): Promise<{ status: number; body: string }> {
   const { authorization, Authorization, host, Host, ...cleanHeaders } = headers;
   cleanHeaders['authorization'] = 'Bearer public';
-  cleanHeaders['x-opencode-client'] = 'desktop';
+  cleanHeaders['x-opencode-client'] = 'cli';
   delete cleanHeaders['content-length'];
   delete cleanHeaders['transfer-encoding'];
   delete cleanHeaders['connection'];
-  delete cleanHeaders['user-agent'];
+  cleanHeaders['user-agent'] = 'opencode/1.18.16 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14';
   delete cleanHeaders['accept-encoding'];
   delete cleanHeaders['host'];
   return new Promise((resolve, reject) => {
@@ -599,11 +671,11 @@ function doHttpsStream(
 ): Promise<{ status: number; stream: ReadableStream<Uint8Array>; headers: Record<string, string> }> {
   const { authorization, Authorization, host, Host, ...cleanHeaders } = headers;
   cleanHeaders['authorization'] = 'Bearer public';
-  cleanHeaders['x-opencode-client'] = 'desktop';
+  cleanHeaders['x-opencode-client'] = 'cli';
   delete cleanHeaders['content-length'];
   delete cleanHeaders['transfer-encoding'];
   delete cleanHeaders['connection'];
-  delete cleanHeaders['user-agent'];
+  cleanHeaders['user-agent'] = 'opencode/1.18.16 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14';
   delete cleanHeaders['accept-encoding'];
   delete cleanHeaders['host'];
   return new Promise((resolve, reject) => {
@@ -676,6 +748,29 @@ function extractUsageFromResponse(respBody: string): { tokens: number; model: st
   return { tokens: 0, model: '' };
 }
 
+// thinking 模型（deepseek-v4-flash-free 等）要求多轮历史里每条 assistant
+// 消息都必须带 reasoning_content 字段；QwenPaw 上下文压缩后部分 assistant
+// 消息缺失该字段，上游 opencode.ai/zen 会返回 400
+// "The reasoning_content in the thinking mode must be passed back to the API"，
+// 导致任务中断。此函数为缺失的 assistant 消息补上空 reasoning_content。
+function patchMissingReasoningContent(reqBody: string): string {
+  if (!reqBody) return reqBody;
+  try {
+    const parsed = JSON.parse(reqBody);
+    if (!parsed || !Array.isArray(parsed.messages)) return reqBody;
+    let changed = false;
+    for (const m of parsed.messages) {
+      if (m && m.role === 'assistant' && !('reasoning_content' in m)) {
+        m.reasoning_content = '';
+        changed = true;
+      }
+    }
+    return changed ? JSON.stringify(parsed) : reqBody;
+  } catch {
+    return reqBody;
+  }
+}
+
 async function dispatchNonStream(
   reqPath: string, reqMethod: string, reqHeaders: Record<string, string>,
   reqBody: string, keyId: string,
@@ -689,7 +784,10 @@ async function dispatchNonStream(
       }
       reqBody = JSON.stringify(parsed);
     } catch {}
+    // thinking 模型要求每条 assistant 消息都带 reasoning_content，缺失则补空
+    reqBody = patchMissingReasoningContent(reqBody);
   }
+  injectOpencodeHeaders(reqHeaders, reqBody);
   let lastErr: any = null;
   let directFallback = false;
   const triedNodes = new Set<string>();
@@ -772,7 +870,10 @@ async function dispatchNonStream(
       }
       reqBody = JSON.stringify(parsed);
     } catch {}
+    // thinking 模型要求每条 assistant 消息都带 reasoning_content，缺失则补空
+    reqBody = patchMissingReasoningContent(reqBody);
   }
+  injectOpencodeHeaders(reqHeaders, reqBody);
   let lastErr: any = null;
   let directFallback = false;
   const triedNodes = new Set<string>();
@@ -906,13 +1007,13 @@ async function handler(req: http.IncomingMessage, res: http.ServerResponse) {
   const url = req.url || '/';
   const method = req.method || 'GET';
   const parsed = new URL(url, `http://${req.headers.host || 'localhost'}`);
-  const path = parsed.pathname;
+  const pathname = parsed.pathname;
 
   try {
     // ───────────────────────────────────────────────
     //  GET /  — 状态页
     // ───────────────────────────────────────────────
-    if (path === '/' && method === 'GET') {
+    if (pathname === '/' && method === 'GET') {
       // 新管理面板：public/index.html 存在则优先返回，否则回退内嵌状态页
       const idxPath = PUBLIC_DIR + '/index.html';
       if (fs.existsSync(idxPath)) {
@@ -938,7 +1039,7 @@ async function handler(req: http.IncomingMessage, res: http.ServerResponse) {
     // ───────────────────────────────────────────────
     //  GET /status  — 简要状态
     // ───────────────────────────────────────────────
-    if (path === '/status' && method === 'GET') {
+    if (pathname === '/status' && method === 'GET') {
       json(res, 200, {
         uptime: Date.now() - START_TIME,
         singbox: { mode: SINGBOX_MODE, ok: singboxOk, nodes: singboxNodes.length, currentNode: singboxNodeIndex },
@@ -952,7 +1053,7 @@ async function handler(req: http.IncomingMessage, res: http.ServerResponse) {
     // ───────────────────────────────────────────────
     //  GET /api/logs
     // ───────────────────────────────────────────────
-    if (path === '/api/logs' && method === 'GET') {
+    if (pathname === '/api/logs' && method === 'GET') {
       json(res, 200, { logs: recentLogs.slice(-200) });
       return;
     }
@@ -960,7 +1061,7 @@ async function handler(req: http.IncomingMessage, res: http.ServerResponse) {
     // ───────────────────────────────────────────────
     //  GET /api/audit
     // ───────────────────────────────────────────────
-    if (path === '/api/audit' && method === 'GET') {
+    if (pathname === '/api/audit' && method === 'GET') {
       json(res, 200, { audit: auditLog.slice(-500) });
       return;
     }
@@ -968,7 +1069,7 @@ async function handler(req: http.IncomingMessage, res: http.ServerResponse) {
     // ───────────────────────────────────────────────
     //  GET /api/keys
     // ───────────────────────────────────────────────
-    if (path === '/api/keys' && method === 'GET') {
+    if (pathname === '/api/keys' && method === 'GET') {
       json(res, 200, { keys: apiKeys });
       return;
     }
@@ -976,7 +1077,7 @@ async function handler(req: http.IncomingMessage, res: http.ServerResponse) {
     // ───────────────────────────────────────────────
     //  POST /api/keys  — 创建 key
     // ───────────────────────────────────────────────
-    if (path === '/api/keys' && method === 'POST') {
+    if (pathname === '/api/keys' && method === 'POST') {
       const body = JSON.parse(await readBody(req));
       const key = body.key || 'sk-' + crypto.randomBytes(16).toString('hex');
       apiKeys[key] = {
@@ -995,8 +1096,8 @@ async function handler(req: http.IncomingMessage, res: http.ServerResponse) {
     // ───────────────────────────────────────────────
     //  DELETE /api/keys/:key
     // ───────────────────────────────────────────────
-    if (path.startsWith('/api/keys/') && method === 'DELETE') {
-      const key = path.slice('/api/keys/'.length);
+    if (pathname.startsWith('/api/keys/') && method === 'DELETE') {
+      const key = pathname.slice('/api/keys/'.length);
       if (apiKeys[key]) { delete apiKeys[key]; saveKeys(); json(res, 200, { success: true }); }
       else json(res, 404, { error: 'key 不存在' });
       return;
@@ -1005,7 +1106,7 @@ async function handler(req: http.IncomingMessage, res: http.ServerResponse) {
     // ───────────────────────────────────────────────
     //  GET /api/models
     // ───────────────────────────────────────────────
-    if (path === '/api/models' && method === 'GET') {
+    if (pathname === '/api/models' && method === 'GET') {
       json(res, 200, { data: cachedModels, cachedAt: cachedModelsTime });
       return;
     }
@@ -1013,7 +1114,7 @@ async function handler(req: http.IncomingMessage, res: http.ServerResponse) {
     // ───────────────────────────────────────────────
     //  POST /api/models/refresh  — 刷新模型列表
     // ───────────────────────────────────────────────
-    if (path === '/api/models/refresh' && method === 'POST') {
+    if (pathname === '/api/models/refresh' && method === 'POST') {
       const models = await fetchModelsFromUpstream();
       json(res, 200, { success: true, count: models.length });
       return;
@@ -1022,7 +1123,7 @@ async function handler(req: http.IncomingMessage, res: http.ServerResponse) {
     // ───────────────────────────────────────────────
     //  POST /api/subscription  — 添加订阅
     // ───────────────────────────────────────────────
-    if (path === '/api/subscription' && method === 'POST') {
+    if (pathname === '/api/subscription' && method === 'POST') {
       const body = JSON.parse(await readBody(req));
       if (!body.url) { json(res, 400, { error: 'url 必填' }); return; }
       const sub: SubscriptionConfig = { url: body.url, token: body.token || '', updatedAt: Date.now() };
@@ -1040,7 +1141,7 @@ async function handler(req: http.IncomingMessage, res: http.ServerResponse) {
     // ───────────────────────────────────────────────
     //  GET /api/subscription  — 查看订阅状态
     // ───────────────────────────────────────────────
-    if (path === '/api/subscription' && method === 'GET') {
+    if (pathname === '/api/subscription' && method === 'GET') {
       const sub = loadSubscription();
       json(res, 200, {
         subscription: sub,
@@ -1056,7 +1157,7 @@ async function handler(req: http.IncomingMessage, res: http.ServerResponse) {
     // ───────────────────────────────────────────────
     //  POST /api/singbox/switch  — 手动切换节点
     // ───────────────────────────────────────────────
-    if (path === '/api/singbox/switch' && method === 'POST') {
+    if (pathname === '/api/singbox/switch' && method === 'POST') {
       const node = await switchSingboxNode();
       if (node) json(res, 200, { success: true, node });
       else json(res, 500, { error: '切换失败' });
@@ -1066,7 +1167,7 @@ async function handler(req: http.IncomingMessage, res: http.ServerResponse) {
     // ───────────────────────────────────────────────
     //  POST /api/singbox/check  — 检查 sing-box 健康
     // ───────────────────────────────────────────────
-    if (path === '/api/singbox/check' && method === 'POST') {
+    if (pathname === '/api/singbox/check' && method === 'POST') {
       const ok = await checkSingboxHealth();
       json(res, 200, { ok, nodes: singboxNodes.length, currentNode: singboxNodes[singboxNodeIndex] || '' });
       return;
@@ -1075,7 +1176,7 @@ async function handler(req: http.IncomingMessage, res: http.ServerResponse) {
     // ───────────────────────────────────────────────
     //  POST /api/singbox/reload  — 重载 sing-box 配置
     // ───────────────────────────────────────────────
-    if (path === '/api/singbox/reload' && method === 'POST') {
+    if (pathname === '/api/singbox/reload' && method === 'POST') {
       const ok = await reloadSingboxConfig();
       json(res, 200, { success: ok });
       return;
@@ -1084,7 +1185,7 @@ async function handler(req: http.IncomingMessage, res: http.ServerResponse) {
     // ───────────────────────────────────────────────
     //  GET /api/stats  — 详细统计
     // ───────────────────────────────────────────────
-    if (path === '/api/stats' && method === 'GET') {
+    if (pathname === '/api/stats' && method === 'GET') {
       json(res, 200, {
         stats,
         uptime: Date.now() - START_TIME,
@@ -1097,7 +1198,7 @@ async function handler(req: http.IncomingMessage, res: http.ServerResponse) {
     // ───────────────────────────────────────────────
     //  v1/chat/completions  — 非流式
     // ───────────────────────────────────────────────
-    if (path === '/v1/chat/completions' && (method === 'POST' || method === 'OPTIONS')) {
+    if (pathname === '/v1/chat/completions' && (method === 'POST' || method === 'OPTIONS')) {
       if (method === 'OPTIONS') { res.writeHead(204, { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'POST,OPTIONS', 'access-control-allow-headers': '*' }); res.end(); return; }
       const body = await readBody(req);
       const auth = req.headers['authorization'] || '';
@@ -1110,7 +1211,7 @@ async function handler(req: http.IncomingMessage, res: http.ServerResponse) {
         const isStream = !!parsed.stream;
         recordKeyUsage(key, 0);
         if (isStream) {
-          const result = await dispatchStream(path, method, collectHeadersFromReq(req), body, key);
+          const result = await dispatchStream(pathname, method, collectHeadersFromReq(req), body, key);
           res.writeHead(result.status, {
             'content-type': 'text/event-stream',
             'cache-control': 'no-cache',
@@ -1124,7 +1225,7 @@ async function handler(req: http.IncomingMessage, res: http.ServerResponse) {
           };
           pump();
         } else {
-          const result = await dispatchNonStream(path, method, collectHeadersFromReq(req), body, key);
+          const result = await dispatchNonStream(pathname, method, collectHeadersFromReq(req), body, key);
           const usage = extractUsageFromResponse(result.body);
           if (usage.tokens > 0) recordKeyUsage(key, usage.tokens);
           res.writeHead(result.status, { 'content-type': 'application/json', 'access-control-allow-origin': '*' });
@@ -1141,7 +1242,7 @@ async function handler(req: http.IncomingMessage, res: http.ServerResponse) {
     // ───────────────────────────────────────────────
     //  v1/* 其他端点 — 代理到上游
     // ───────────────────────────────────────────────
-    if (path.startsWith('/v1/')) {
+    if (pathname.startsWith('/v1/')) {
       const auth = req.headers['authorization'] || '';
       const key = auth.replace(/^Bearer\s+/i, '').trim();
       const v = validateKey(key);
@@ -1149,9 +1250,9 @@ async function handler(req: http.IncomingMessage, res: http.ServerResponse) {
       acquireKey(key);
       try {
         const body = method === 'GET' || method === 'DELETE' ? undefined : await readBody(req);
-        const result = await dispatchNonStream(path, method, collectHeadersFromReq(req), body || '', key);
+        const result = await dispatchNonStream(pathname, method, collectHeadersFromReq(req), body || '', key);
         // /v1/models 只保留 free 模型（兼容旧行为，big-pickle 是隐身免费模型）
-        if (path === '/v1/models' && result.status === 200 && result.body) {
+        if (pathname === '/v1/models' && result.status === 200 && result.body) {
           try {
             const parsed = JSON.parse(result.body);
             const all = parsed.data || parsed.models || [];
@@ -1179,8 +1280,8 @@ async function handler(req: http.IncomingMessage, res: http.ServerResponse) {
     // ───────────────────────────────────────────────
     //  静态文件服务 — public/ 目录（管理面板资源）
     // ───────────────────────────────────────────────
-    if (method === 'GET' && !path.startsWith('/api/') && !path.startsWith('/v1/') && path !== '/status' && path !== '/ping') {
-      if (serveStatic(res, path)) return;
+    if (method === 'GET' && !pathname.startsWith('/api/') && !pathname.startsWith('/v1/') && pathname !== '/status' && pathname !== '/ping') {
+      if (serveStatic(res, pathname)) return;
       // SPA fallback：非 API 路径找不到文件时回退 index.html
       const idxPath = PUBLIC_DIR + '/index.html';
       if (fs.existsSync(idxPath)) {
