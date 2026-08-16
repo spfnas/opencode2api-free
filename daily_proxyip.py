@@ -33,6 +33,8 @@ OPENCODE_TIMEOUT = 8
 MAX_WORKERS = 64
 TARGET_NODES = 100   # 用户要求：100 个可用节点即可，不够再跑
 GATE_BASE = "http://192.168.1.202:13339"
+GH_REPO = "spfnas/opencode2api-free"   # GitHub 同步目标（gh api 上传）
+GH_FILE = "proxyip_sub.txt"            # GitHub 上的路径
 GATE_KEY = "admin123"
 SUB_URL = "http://localhost:13339/proxyip_sub.txt"
 
@@ -200,6 +202,32 @@ def main():
             print(f"[5/5] gate 响应: {r.stdout.strip()[:200]}", flush=True)
         except Exception as e:
             print(f"[5/5] gate 失败: {e}", flush=True)
+    # 同步到 GitHub（gh api 走 api.github.com，git push 的 github.com:443 常被 TLS 掐断）
+    if do_sub or "--push" in sys.argv:
+        try:
+            import base64 as b64
+            content = open(OUT_FILE, "rb").read()
+            # 已存在的文件需要 sha 才能更新；不存在则直接创建
+            sha = ""
+            g = subprocess.run(["gh", "api", f"repos/{GH_REPO}/contents/{GH_FILE}"],
+                               capture_output=True, text=True, timeout=30)
+            if g.returncode == 0:
+                try:
+                    import json as _json
+                    sha = _json.loads(g.stdout).get("sha", "")
+                except Exception:
+                    sha = ""
+            args = ["gh", "api", "--method", "PUT",
+                    f"repos/{GH_REPO}/contents/{GH_FILE}",
+                    "-f", "message=" + time.strftime("daily: proxyip_sub %Y-%m-%d %H:%M (geo)"),
+                    "-f", "content=" + b64.b64encode(content).decode(),
+                    "-f", "branch=main"]
+            if sha:
+                args += ["-f", f"sha={sha}"]
+            r = subprocess.run(args, capture_output=True, text=True, timeout=90)
+            print(f"[6/5] GitHub 推送: {'OK ' + r.stdout[:80] if r.returncode == 0 else 'FAIL ' + r.stderr[-200:]}", flush=True)
+        except Exception as e:
+            print(f"[6/5] GitHub 推送异常: {e}", flush=True)
     print("\n✅ 每日反代 IP 任务完成", flush=True)
 
 if __name__ == "__main__":
